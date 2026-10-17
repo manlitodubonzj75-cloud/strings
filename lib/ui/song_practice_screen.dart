@@ -13,26 +13,15 @@ import '../music_theory.dart';
 import '../services/midi_parser.dart';
 import '../services/omr_parser.dart';
 import '../services/midi_generator.dart';
-import '../services/song_audio_generator.dart';
-import '../services/ddsp_violin_synthesizer.dart';
 import '../theme/apple_violin_theme.dart';
 import 'widgets/musical_staff_view.dart';
 import '../services/score_edit_controller.dart';
 import 'widgets/multi_measure_score_view.dart';
 import 'widgets/score_editor_toolbar.dart';
 import 'widgets/intonation_quality_hud.dart';
+import '../controllers/song_practice_controller.dart';
 
-enum PracticeMode {
-  waitNote,
-  playAlong,
-}
-
-enum RepertoireCategory {
-  all,
-  classical,
-  suzuki,
-  custom,
-}
+export '../controllers/song_practice_controller.dart' show PracticeMode, RepertoireCategory;
 
 class SongPracticeScreen extends StatefulWidget {
   final AudioEngine audioEngine;
@@ -40,6 +29,7 @@ class SongPracticeScreen extends StatefulWidget {
   final ValueNotifier<DetectedNoteInfo?>? noteNotifier;
   final bool isMobileMode;
   final bool autoTranscribeOnStart;
+  final SongPracticeController? controller;
 
   const SongPracticeScreen({
     super.key,
@@ -48,6 +38,7 @@ class SongPracticeScreen extends StatefulWidget {
     this.noteNotifier,
     this.isMobileMode = false,
     this.autoTranscribeOnStart = true,
+    this.controller,
   });
 
   @override
@@ -55,64 +46,21 @@ class SongPracticeScreen extends StatefulWidget {
 }
 
 class _SongPracticeScreenState extends State<SongPracticeScreen> {
-  late Song _currentSong;
-  List<Song> _availableSongs = [];
-  RepertoireCategory _selectedCategory = RepertoireCategory.all;
-  late ScoreEditController _scoreController;
+  late SongPracticeController _controller;
+  bool _ownsController = false;
   bool _showFullScore = true;
-
-  PracticeMode _practiceMode = PracticeMode.waitNote;
-  bool _isPlaying = false;
-  bool _isSoundError = false;
-  String _soundErrorMessage = '';
-  String? _legatoFeedback;
-  bool _isAccompanimentOn = true;
-  double _playbackSpeed = 1.0;
-  static const List<double> _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-
-  void _cyclePlaybackSpeed() {
-    setState(() {
-      final idx = _speedOptions.indexOf(_playbackSpeed);
-      final nextIdx = (idx + 1) % _speedOptions.length;
-      _playbackSpeed = _speedOptions[nextIdx];
-      if (_isDemoPlaying && !_isDemoPaused) {
-        _resumeDemo();
-      }
-    });
-  }
-
-  int _currentNoteIndex = 0;
-  int _playbackTimeMs = 0;
-  Timer? _playbackTimer;
-  bool _isDemoPlaying = false;
-  bool _isDemoPaused = false;
-  // ignore: unused_field
-  int _lastNotePlayed = -1;
-  Timer? _demoTimer;
-  Stopwatch? _demoStopwatch;
-  bool _isRenderingDdsp = false;
-  String _ddspStatus = '';
-  double _ddspProgress = 0.0;
-  Float32List? _cachedDdspPcm;
-  String? _cachedDdspSongId;
-  double? _cachedDdspSpeed;
-  int _demoFromMs = 0;
-  int _nextNoteIndex = 0;
-
-  int _score = 0;
-  int _streak = 0;
-  int _bestStreak = 0;
-
-  DateTime _lastHitTime = DateTime.now();
 
   @override
   void initState() {
     super.initState();
-    _availableSongs = SongLibrary.builtinSongs;
-    _currentSong = _availableSongs.first;
-    _scoreController = ScoreEditController(initialSong: _currentSong);
-    _scoreController.addListener(_onScoreControllerChanged);
-    _resetPractice();
+    if (widget.controller != null) {
+      _controller = widget.controller!;
+      _ownsController = false;
+    } else {
+      _controller = SongPracticeController(audioEngine: widget.audioEngine);
+      _ownsController = true;
+    }
+    _controller.addListener(_onControllerChanged);
     widget.noteNotifier?.addListener(_onNoteFromNotifier);
 
     // Auto-load Paganini Caprice No. 5 on startup for instant end-to-end testing
@@ -129,29 +77,19 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     }
   }
 
-  void _onScoreControllerChanged() {
-    if (!mounted) return;
-    if (_currentSong != _scoreController.song) {
-      setState(() {
-        _currentSong = _scoreController.song;
-        _cachedDdspPcm = null;
-      });
-    } else {
-      setState(() {});
-    }
+  void _onControllerChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onNoteFromNotifier() {
-    if (!mounted || !_isPlaying || _isDemoPlaying) return;
+    if (!mounted) return;
     final note = widget.noteNotifier?.value;
-    if (note == null) return;
-
-    if (_practiceMode == PracticeMode.waitNote) {
-      if (_currentNoteIndex < _currentSong.notes.length) {
-        _checkWaitNoteHit(_currentSong.notes[_currentNoteIndex], note);
-      }
-    } else if (_practiceMode == PracticeMode.playAlong) {
-      _checkPlayAlongHit();
+    if (note != null) {
+      _controller.checkIncomingNote(
+        note,
+        lastPitchResult: widget.audioEngine.lastPitchResult,
+        onComplete: _showCompletionDialog,
+      );
     }
   }
 
@@ -163,420 +101,37 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       widget.noteNotifier?.addListener(_onNoteFromNotifier);
     }
     if (widget.noteNotifier == null && oldWidget.currentNote != widget.currentNote) {
-      if (mounted && _isPlaying && !_isDemoPlaying && widget.currentNote != null) {
-        if (_practiceMode == PracticeMode.waitNote && _currentNoteIndex < _currentSong.notes.length) {
-          _checkWaitNoteHit(_currentSong.notes[_currentNoteIndex], widget.currentNote!);
-        } else if (_practiceMode == PracticeMode.playAlong) {
-          _checkPlayAlongHit();
-        }
+      if (mounted && widget.currentNote != null) {
+        _controller.checkIncomingNote(
+          widget.currentNote!,
+          lastPitchResult: widget.audioEngine.lastPitchResult,
+          onComplete: _showCompletionDialog,
+        );
       }
+    }
+    if (widget.controller != null && widget.controller != _controller) {
+      _controller.removeListener(_onControllerChanged);
+      if (_ownsController) {
+        _controller.dispose();
+      }
+      _controller = widget.controller!;
+      _ownsController = false;
+      _controller.addListener(_onControllerChanged);
     }
   }
 
   @override
   void dispose() {
     widget.noteNotifier?.removeListener(_onNoteFromNotifier);
-    _scoreController.removeListener(_onScoreControllerChanged);
-    _scoreController.dispose();
-    _playbackTimer?.cancel();
-    _demoTimer?.cancel();
-    _demoStopwatch?.stop();
-    widget.audioEngine.stopTone();
+    _controller.removeListener(_onControllerChanged);
+    if (_ownsController) {
+      _controller.dispose();
+    }
     super.dispose();
   }
 
-  void _resetPractice() {
-    _playbackTimer?.cancel();
-    _demoTimer?.cancel();
-    _demoStopwatch?.stop();
-    widget.audioEngine.stopTone();
-    _cachedDdspPcm = null;
-    setState(() {
-      _isDemoPlaying = false;
-      _isDemoPaused = false;
-      _lastNotePlayed = -1;
-      _isPlaying = false;
-      _isSoundError = false;
-      _soundErrorMessage = '';
-      _legatoFeedback = null;
-      _currentNoteIndex = 0;
-      _playbackTimeMs = 0;
-      _score = 0;
-      _streak = 0;
-      for (final n in _currentSong.notes) {
-        n.isHit = false;
-      }
-    });
-  }
-
-  void _startPlayback() {
-    _demoTimer?.cancel();
-    setState(() {
-      _isDemoPlaying = false;
-      _isPlaying = true;
-      _isSoundError = false;
-      _legatoFeedback = null;
-    });
-
-    if (_practiceMode == PracticeMode.playAlong) {
-      _playbackTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
-        if (!_isSoundError) {
-          setState(() {
-            _playbackTimeMs += (30 * _playbackSpeed).round();
-            if (_scoreController.loopRange.isEnabled) {
-              final loopEnd = _scoreController.loopRange.getEndTimeMs(_scoreController.measures);
-              final loopStart = _scoreController.loopRange.getStartTimeMs(_scoreController.measures);
-              if (_playbackTimeMs >= loopEnd) {
-                _playbackTimeMs = loopStart;
-                int idx = 0;
-                while (idx < _currentSong.notes.length && _currentSong.notes[idx].startTimeMs < loopStart) {
-                  idx++;
-                }
-                _currentNoteIndex = idx.clamp(0, _currentSong.notes.length - 1);
-              }
-            }
-            _checkPlayAlongHit();
-
-            if (_playbackTimeMs >= _currentSong.totalDurationMs) {
-              _playbackTimer?.cancel();
-              _isPlaying = false;
-            }
-          });
-        }
-      });
-    }
-  }
-
-
-  Future<void> _startDemo({int fromMs = 0}) async {
-    if (_isRenderingDdsp) return;
-
-    _playbackTimer?.cancel();
-    _demoTimer?.cancel();
-    _demoStopwatch?.stop();
-    widget.audioEngine.stopTone();
-
-    final clampedFromMs = fromMs.clamp(0, _currentSong.totalDurationMs);
-    _demoFromMs = clampedFromMs;
-
-    // Pre-render entire score using Neural DDSP (Bach Violin model)
-    if (_cachedDdspPcm == null ||
-        _cachedDdspSongId != _currentSong.id ||
-        _cachedDdspSpeed != _playbackSpeed) {
-      setState(() {
-        _isRenderingDdsp = true;
-        _ddspProgress = 0.05;
-        _ddspStatus = 'Загрузка ИИ-нейросети DDSP (Bach Violin)...';
-      });
-
-      try {
-        final pcm = await DdspViolinSynthesizer.synthesizeSong(
-          _currentSong,
-          speedMultiplier: _playbackSpeed,
-          onProgress: (p, s) {
-            if (mounted) {
-              setState(() {
-                _ddspProgress = p;
-                _ddspStatus = s;
-              });
-            }
-          },
-        );
-        _cachedDdspPcm = pcm;
-        _cachedDdspSongId = _currentSong.id;
-        _cachedDdspSpeed = _playbackSpeed;
-      } catch (_) {
-        _cachedDdspPcm = SongAudioGenerator.generatePcm(
-          _currentSong,
-          sampleRate: 44100,
-          speedMultiplier: _playbackSpeed,
-          addHarmonics: true,
-          addVibrato: true,
-          addMeasureDynamics: true,
-        );
-        _cachedDdspSongId = _currentSong.id;
-        _cachedDdspSpeed = _playbackSpeed;
-      } finally {
-        if (mounted) {
-          setState(() {
-            _isRenderingDdsp = false;
-          });
-        }
-      }
-    }
-
-    if (!mounted) return;
-
-    // Audio launches ONLY AFTER the entire piece is fully rendered!
-    final fullPcm = _cachedDdspPcm!;
-    final timeDilation = 1.0 / _playbackSpeed.clamp(0.1, 4.0);
-    final startSec = (clampedFromMs * timeDilation) / 1000.0;
-    final startSample = (startSec * 44100).round().clamp(0, fullPcm.length);
-    final pcmSamples = (startSample == 0)
-        ? fullPcm
-        : Float32List.sublistView(fullPcm, startSample);
-
-    widget.audioEngine.playPcmBuffer(pcmSamples);
-    _demoStopwatch = Stopwatch()..start();
-
-    // Fast O(1) monotonic cursor for notes
-    _nextNoteIndex = 0;
-    while (_nextNoteIndex < _currentSong.notes.length &&
-        _currentSong.notes[_nextNoteIndex].startTimeMs < clampedFromMs) {
-      _nextNoteIndex++;
-    }
-
-    _lastNotePlayed = -1;
-    int initialActiveIdx = 0;
-    for (int i = 0; i < _currentSong.notes.length; i++) {
-      final n = _currentSong.notes[i];
-      if (clampedFromMs >= n.startTimeMs && clampedFromMs < n.startTimeMs + n.durationMs) {
-        initialActiveIdx = i;
-        _lastNotePlayed = i;
-        break;
-      }
-    }
-
-    setState(() {
-      _isPlaying = false;
-      _isDemoPlaying = true;
-      _isDemoPaused = false;
-      _isSoundError = false;
-      _soundErrorMessage = '';
-      _currentNoteIndex = initialActiveIdx;
-      _playbackTimeMs = clampedFromMs;
-    });
-
-    _demoTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
-      if (!mounted || !_isDemoPlaying) {
-        timer.cancel();
-        return;
-      }
-      if (_isDemoPaused) return;
-
-      final elapsedMs = _demoStopwatch?.elapsedMilliseconds ?? 0;
-      final currentTime = _demoFromMs + (elapsedMs * _playbackSpeed).round();
-
-      if (_scoreController.loopRange.isEnabled) {
-        final loopEnd = _scoreController.loopRange.getEndTimeMs(_scoreController.measures);
-        final loopStart = _scoreController.loopRange.getStartTimeMs(_scoreController.measures);
-        if (currentTime >= loopEnd) {
-          _startDemo(fromMs: loopStart);
-          return;
-        }
-      }
-
-      while (_nextNoteIndex < _currentSong.notes.length) {
-        final note = _currentSong.notes[_nextNoteIndex];
-        if (note.startTimeMs <= currentTime) {
-          _lastNotePlayed = _nextNoteIndex;
-          _currentNoteIndex = _nextNoteIndex;
-          _nextNoteIndex++;
-        } else {
-          break;
-        }
-      }
-
-      setState(() {
-        _playbackTimeMs = currentTime;
-        if (_playbackTimeMs >= _currentSong.totalDurationMs + 400) {
-          _stopDemo();
-        }
-      });
-    });
-  }
-
-  void _pauseDemo() {
-    _demoTimer?.cancel();
-    _demoStopwatch?.stop();
-    widget.audioEngine.stopTone();
-    setState(() {
-      _isDemoPaused = true;
-    });
-  }
-
-  void _resumeDemo() {
-    _startDemo(fromMs: _playbackTimeMs);
-  }
-
-  void _seekDemo(int targetMs) {
-    widget.audioEngine.stopTone();
-    final clamped = targetMs.clamp(0, _currentSong.totalDurationMs);
-    if (_isDemoPlaying) {
-      _startDemo(fromMs: clamped);
-    } else {
-      setState(() {
-        _playbackTimeMs = clamped;
-        for (int i = 0; i < _currentSong.notes.length; i++) {
-          final n = _currentSong.notes[i];
-          if (clamped >= n.startTimeMs && clamped < n.startTimeMs + n.durationMs) {
-            _currentNoteIndex = i;
-            break;
-          }
-        }
-      });
-    }
-  }
-
-  void _stopDemo() {
-    _demoTimer?.cancel();
-    _demoStopwatch?.stop();
-    widget.audioEngine.stopTone();
-    setState(() {
-      _isDemoPlaying = false;
-      _isDemoPaused = false;
-      _playbackTimeMs = 0;
-      _lastNotePlayed = -1;
-      _currentNoteIndex = 0;
-    });
-  }
-  void _pausePlayback() {
-    _playbackTimer?.cancel();
-    setState(() {
-      _isPlaying = false;
-    });
-  }
-
-  void _checkWaitNoteHit(SongNote targetNote, DetectedNoteInfo note) {
-    if (note.isScratching) {
-      setState(() {
-        _isSoundError = true;
-        _soundErrorMessage = '⚠️ Скрип смычка: звук заблокирован. Ослабьте нажим смычка!';
-        _streak = 0;
-      });
-      return;
-    }
-
-    final semitoneDiff = (note.midiNote - targetNote.midiNote).abs();
-    final isPitchClassMatch = (semitoneDiff % 12) == 0;
-
-    final targetHz = MusicTheory.midiToHz(targetNote.midiNote);
-    final rawCents = MusicTheory.calculateCents(note.rawHz, targetHz);
-    final octaveOffset = (rawCents / 1200.0).round();
-    final intonationCents = rawCents - (octaveOffset * 1200.0);
-
-    if (!isPitchClassMatch) {
-      final semitoneMod = (note.midiNote - targetNote.midiNote) % 12;
-      final isNearHalfStep = (semitoneMod == 1 || semitoneMod == 11);
-      final isFlat = (semitoneMod == 11);
-      setState(() {
-        _isSoundError = true;
-        _soundErrorMessage = isNearHalfStep
-            ? (isFlat ? "Палец низит на полутон" : "Палец высит на полутон")
-            : "Неверная нота (${note.solfegeName} вместо ${MusicTheory.midiToSolfege(targetNote.midiNote)})";
-      });
-      return;
-    }
-
-    // In violin practice, tolerance of +/- 35 cents allows natural playing and vibrato
-    if (intonationCents.abs() > 35.0) {
-      final isFlat = intonationCents < 0;
-      setState(() {
-        _isSoundError = true;
-        _soundErrorMessage = isFlat
-            ? "Палец низит (${intonationCents.toStringAsFixed(0)}¢). Сдвиньте к подставке"
-            : "Палец высит (+${intonationCents.toStringAsFixed(0)}¢). Сдвиньте к колкам";
-      });
-      return;
-    }
-
-    final now = DateTime.now();
-    if (now.difference(_lastHitTime).inMilliseconds < 120) return;
-    _lastHitTime = now;
-
-    int bonus = 100;
-    String? slurMsg;
-
-    if (targetNote.isSlurred && widget.audioEngine.lastPitchResult?.isLegato == true) {
-      bonus += 250;
-      slurMsg = '✨ Чистое легато на один смычок! (+250)';
-    }
-
-    setState(() {
-      _isSoundError = false;
-      _soundErrorMessage = '';
-      _legatoFeedback = slurMsg;
-      targetNote.isHit = true;
-      _score += bonus;
-      _streak++;
-      if (_streak > _bestStreak) _bestStreak = _streak;
-
-      if (_scoreController.loopRange.isEnabled) {
-        final loopEnd = _scoreController.loopRange.getEndTimeMs(_scoreController.measures);
-        final loopStart = _scoreController.loopRange.getStartTimeMs(_scoreController.measures);
-        if (_currentNoteIndex < _currentSong.notes.length - 1) {
-          final nextNote = _currentSong.notes[_currentNoteIndex + 1];
-          if (nextNote.startTimeMs >= loopEnd) {
-            int firstNote = 0;
-            while (firstNote < _currentSong.notes.length &&
-                _currentSong.notes[firstNote].startTimeMs < loopStart) {
-              firstNote++;
-            }
-            _currentNoteIndex = firstNote.clamp(0, _currentSong.notes.length - 1);
-          } else {
-            _currentNoteIndex++;
-          }
-        } else {
-          _showCompletionDialog();
-        }
-      } else {
-        if (_currentNoteIndex < _currentSong.notes.length - 1) {
-          _currentNoteIndex++;
-        } else {
-          _showCompletionDialog();
-        }
-      }
-    });
-  }
-
-  void _checkPlayAlongHit() {
-    if (_currentNoteIndex >= _currentSong.notes.length) return;
-    final targetNote = _currentSong.notes[_currentNoteIndex];
-    final note = widget.currentNote;
-
-    if (_playbackTimeMs >= targetNote.startTimeMs + targetNote.durationMs) {
-      if (_currentNoteIndex < _currentSong.notes.length - 1) {
-        _currentNoteIndex++;
-        _isSoundError = false;
-        _soundErrorMessage = '';
-        _legatoFeedback = null;
-      }
-      return;
-    }
-
-    if (note == null) return;
-
-    if (note.isScratching) {
-      _isSoundError = true;
-      _soundErrorMessage = '⚠️ Скрип канифоли! Пьеса приостановлена.';
-      return;
-    }
-
-    final semitoneDiff = (note.midiNote - targetNote.midiNote).abs();
-    final isPitchClassMatch = (semitoneDiff % 12) == 0;
-    final targetHz = MusicTheory.midiToHz(targetNote.midiNote);
-    final rawCents = MusicTheory.calculateCents(note.rawHz, targetHz);
-    final octaveOffset = (rawCents / 1200.0).round();
-    final intonationCents = rawCents - (octaveOffset * 1200.0);
-    final matchesTarget = isPitchClassMatch && (intonationCents.abs() <= 35.0);
-
-    if (matchesTarget) {
-      if (!targetNote.isHit) {
-        int bonus = 100;
-        String? slurMsg;
-        if (targetNote.isSlurred && widget.audioEngine.lastPitchResult?.isLegato == true) {
-          bonus += 250;
-          slurMsg = '✨ Чистое легато на один смычок!';
-        }
-        targetNote.isHit = true;
-        _score += bonus;
-        _streak++;
-        _isSoundError = false;
-        _soundErrorMessage = '';
-        _legatoFeedback = slurMsg;
-      }
-    }
-  }
+  ScoreEditController get _scoreController => _controller.scoreController;
+  Song get _currentSong => _controller.currentSong;
 
   void _showCompletionDialog() {
     final totalNotes = _currentSong.notes.length;
@@ -604,8 +159,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             Row(
               children: [
                 Expanded(child: _telemetryCell('ТОЧНОСТЬ', '$accuracy%', AppleViolinTheme.hyperEmerald)),
-                Expanded(child: _telemetryCell('ОЧКИ', '$_score', AppleViolinTheme.solarAmber)),
-                Expanded(child: _telemetryCell('СЕРИЯ', '$_bestStreak', AppleViolinTheme.highVoltageLime)),
+                Expanded(child: _telemetryCell('ОЧКИ', '${_controller.score}', AppleViolinTheme.solarAmber)),
+                Expanded(child: _telemetryCell('СЕРИЯ', '${_controller.bestStreak}', AppleViolinTheme.highVoltageLime)),
               ],
             ),
           ],
@@ -614,7 +169,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           GestureDetector(
             onTap: () {
               Navigator.pop(ctx);
-              _resetPractice();
+              _controller.resetPractice();
             },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
@@ -717,13 +272,9 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
       final result = await SheetMusicOmrParser.parseImageBytes(bytes, title: title);
 
-      setState(() {
-        _availableSongs = [result.song, ..._availableSongs];
-        _currentSong = result.song;
-        _selectedCategory = RepertoireCategory.custom;
-        _scoreController.setSong(result.song);
-        _resetPractice();
-      });
+      _controller.setAvailableSongs([result.song, ..._controller.availableSongs]);
+      _controller.selectCategory(RepertoireCategory.custom);
+      _controller.selectSong(result.song);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -780,18 +331,10 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
         autoStart: autoStart,
         onClose: () => Navigator.pop(ctx),
         onSongTranscribed: (song, report, preRenderedPcm) {
-          setState(() {
-            _availableSongs = [song, ..._availableSongs];
-            _currentSong = song;
-            _selectedCategory = RepertoireCategory.custom;
-            _scoreController.setSong(song);
-            _resetPractice();
-            if (preRenderedPcm != null && preRenderedPcm.isNotEmpty) {
-              _cachedDdspPcm = preRenderedPcm;
-              _cachedDdspSongId = song.id;
-              _cachedDdspSpeed = _playbackSpeed;
-            }
-          });
+          _controller.setAvailableSongs([song, ..._controller.availableSongs]);
+          _controller.selectCategory(RepertoireCategory.custom);
+          _controller.selectSong(song);
+
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -802,7 +345,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             );
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted) {
-                _startDemo(fromMs: 0);
+                _controller.startDemo(fromMs: 0);
               }
             });
           }
@@ -826,12 +369,8 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       final fileName = pickedFile.name;
       final loadedSong = MidiParser.parseMidiBytes(bytes, title: fileName);
 
-      setState(() {
-        _availableSongs = [loadedSong, ..._availableSongs];
-        _currentSong = loadedSong;
-        _scoreController.setSong(loadedSong);
-        _resetPractice();
-      });
+      _controller.setAvailableSongs([loadedSong, ..._controller.availableSongs]);
+      _controller.selectSong(loadedSong);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -854,15 +393,15 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   List<Song> get _filteredSongs {
-    switch (_selectedCategory) {
+    switch (_controller.selectedCategory) {
       case RepertoireCategory.classical:
-        return _availableSongs.where((s) => s.id == 'canon_d' || s.id == 'ode_to_joy').toList();
+        return _controller.availableSongs.where((s) => s.id == 'canon_d' || s.id == 'ode_to_joy').toList();
       case RepertoireCategory.suzuki:
-        return _availableSongs.where((s) => s.id.contains('suzuki') || s.id.contains('twinkle')).toList();
+        return _controller.availableSongs.where((s) => s.id.contains('suzuki') || s.id.contains('twinkle')).toList();
       case RepertoireCategory.custom:
-        return _availableSongs.where((s) => !SongLibrary.builtinSongs.any((b) => b.id == s.id)).toList();
+        return _controller.availableSongs.where((s) => !SongLibrary.builtinSongs.any((b) => b.id == s.id)).toList();
       case RepertoireCategory.all:
-        return _availableSongs;
+        return _controller.availableSongs;
     }
   }
 
@@ -873,14 +412,12 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
     SongNote? targetNote;
     SongNote? nextTargetNote;
-    if (_currentNoteIndex < _currentSong.notes.length) {
-      targetNote = _currentSong.notes[_currentNoteIndex];
-      if (_currentNoteIndex + 1 < _currentSong.notes.length) {
-        nextTargetNote = _currentSong.notes[_currentNoteIndex + 1];
+    if (_controller.currentNoteIndex < _currentSong.notes.length) {
+      targetNote = _currentSong.notes[_controller.currentNoteIndex];
+      if (_controller.currentNoteIndex + 1 < _currentSong.notes.length) {
+        nextTargetNote = _currentSong.notes[_controller.currentNoteIndex + 1];
       }
     }
-
-// Note hit evaluations handled in didUpdateWidget & _onNoteFromNotifier
 
     final totalNotes = _currentSong.notes.length;
     final hitCount = _currentSong.notes.where((n) => n.isHit).length;
@@ -1018,49 +555,44 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                           runSpacing: 6,
                           children: [
                             _statusPill(
-                              label: _isDemoPlaying ? 'ДЕМО' : (_isPlaying ? 'ИГРАЮ' : 'ПАУЗА'),
-                              color: (_isPlaying || _isDemoPlaying)
+                              label: _controller.isDemoPlaying ? 'ДЕМО' : (_controller.isPlaying ? 'ИГРАЮ' : 'ПАУЗА'),
+                              color: (_controller.isPlaying || _controller.isDemoPlaying)
                                   ? AppleViolinTheme.highVoltageLime
                                   : AppleViolinTheme.subtext,
-                              pulse: _isPlaying || _isDemoPlaying,
+                              pulse: _controller.isPlaying || _controller.isDemoPlaying,
                             ),
                             _actionPill(
                               icon: Icons.shutter_speed_rounded,
                               label: 'x',
-                              active: _playbackSpeed != 1.0,
+                              active: _controller.playbackSpeed != 1.0,
                               activeColor: AppleViolinTheme.appleTeal,
-                              onTap: _cyclePlaybackSpeed,
+                              onTap: _controller.cyclePlaybackSpeed,
                             ),
                             _actionPill(
-                              icon: _practiceMode == PracticeMode.waitNote
+                              icon: _controller.practiceMode == PracticeMode.waitNote
                                   ? Icons.touch_app_rounded
                                   : Icons.speed_rounded,
-                              label: _practiceMode == PracticeMode.waitNote ? 'ЖДАТЬ НОТУ' : 'В ТЕМПЕ',
+                              label: _controller.practiceMode == PracticeMode.waitNote ? 'ЖДАТЬ НОТУ' : 'В ТЕМПЕ',
                               active: true,
                               activeColor: AppleViolinTheme.solarAmber,
                               onTap: () {
-                                setState(() {
-                                  _practiceMode = _practiceMode == PracticeMode.waitNote
+                                _controller.setPracticeMode(
+                                  _controller.practiceMode == PracticeMode.waitNote
                                       ? PracticeMode.playAlong
-                                      : PracticeMode.waitNote;
-                                  _resetPractice();
-                                });
+                                      : PracticeMode.waitNote,
+                                );
                               },
                             ),
                             _actionPill(
                               icon: Icons.volume_up_rounded,
-                              label: _isAccompanimentOn ? 'Ф-НО ВКЛ' : 'Ф-НО ВЫКЛ',
-                              active: _isAccompanimentOn,
+                              label: _controller.isAccompanimentOn ? 'Ф-НО ВКЛ' : 'Ф-НО ВЫКЛ',
+                              active: _controller.isAccompanimentOn,
                               activeColor: AppleViolinTheme.hyperEmerald,
-                              onTap: () {
-                                setState(() {
-                                  _isAccompanimentOn = !_isAccompanimentOn;
-                                });
-                              },
+                              onTap: _controller.toggleAccompaniment,
                             ),
                             _actionPill(
                               icon: Icons.auto_stories_rounded,
-                              label: _showFullScore ? 'ПАРТИТУРА' : 'ФОКУС',
+                              label: _showFullScore ? 'ПАРТИarchive' : 'ФОКУС',
                               active: _showFullScore,
                               activeColor: AppleViolinTheme.electricCobalt,
                               onTap: () {
@@ -1089,21 +621,21 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 if (_showFullScore) ...[
                   IntonationQualityHud(
                     targetNote: targetNote,
-                    detectedNote: _isDemoPlaying ? null : note,
-                    isScratching: _isDemoPlaying ? false : (note?.isScratching ?? false),
-                    isInTune: _isDemoPlaying ? true : (note?.isInTune ?? false),
-                    cents: _isDemoPlaying ? 0.0 : (note?.cents ?? 0.0),
-                    practiceModeLabel: _practiceMode == PracticeMode.waitNote ? 'Ждать ноту' : 'В темпе',
+                    detectedNote: _controller.isDemoPlaying ? null : note,
+                    isScratching: _controller.isDemoPlaying ? false : (note?.isScratching ?? false),
+                    isInTune: _controller.isDemoPlaying ? true : (note?.isInTune ?? false),
+                    cents: _controller.isDemoPlaying ? 0.0 : (note?.cents ?? 0.0),
+                    practiceModeLabel: _controller.practiceMode == PracticeMode.waitNote ? 'Ждать ноту' : 'В темпе',
                   ),
                   const SizedBox(height: 10),
                   MultiMeasureScoreView(
                     measures: _scoreController.measures,
                     loopRange: _scoreController.loopRange,
-                    currentNoteIndex: _currentNoteIndex,
+                    currentNoteIndex: _controller.currentNoteIndex,
                     targetMidi: targetNote?.midiNote,
-                    playedMidi: _isDemoPlaying ? null : note?.midiNote,
-                    isInTune: _isDemoPlaying ? true : (note?.isInTune ?? false),
-                    isScratching: _isDemoPlaying ? false : (note?.isScratching ?? false),
+                    playedMidi: _controller.isDemoPlaying ? null : note?.midiNote,
+                    isInTune: _controller.isDemoPlaying ? true : (note?.isInTune ?? false),
+                    isScratching: _controller.isDemoPlaying ? false : (note?.isScratching ?? false),
                     selectedNoteIndex: _scoreController.selectedNoteIndex,
                     selectedMeasureIndex: _scoreController.selectedMeasureIndex,
                     onNoteTapped: (idx) => _scoreController.selectNote(idx),
@@ -1116,16 +648,16 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                     controller: _scoreController,
                     onPlayLoop: () {
                       final loopStartMs = _scoreController.loopRange.getStartTimeMs(_scoreController.measures);
-                      _startDemo(fromMs: loopStartMs);
+                      _controller.startDemo(fromMs: loopStartMs);
                     },
                   ),
                 ] else ...[
                   MusicalStaffView(
                     targetMidi: targetNote?.midiNote,
                     nextTargetMidi: nextTargetNote?.midiNote,
-                    playedMidi: _isDemoPlaying ? null : note?.midiNote,
-                    isScratching: _isDemoPlaying ? false : (note?.isScratching ?? false),
-                    isInTune: _isDemoPlaying ? true : (note?.isInTune ?? false),
+                    playedMidi: _controller.isDemoPlaying ? null : note?.midiNote,
+                    isScratching: _controller.isDemoPlaying ? false : (note?.isScratching ?? false),
+                    isInTune: _controller.isDemoPlaying ? true : (note?.isInTune ?? false),
                     isSlurred: targetNote?.isSlurred ?? false,
                     bowDirection: targetNote?.bowDirection,
                     noteLabel: targetNote != null ? '${targetNote.noteName} (Струна ${targetNote.string.name})' : null,
@@ -1138,17 +670,17 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 // Micro-telemetry readout
                 _telemetryRow(
                   targetLabel: targetNote?.noteName ?? '—',
-                  heardLabel: _isDemoPlaying ? 'ЭТАЛОН' : (note == null ? '—' : note.solfegeBase),
+                  heardLabel: _controller.isDemoPlaying ? 'ЭТАЛОН' : (note == null ? '—' : note.solfegeBase),
                   accuracy: accuracy,
                   totalNotes: totalNotes,
                 ),
 
                 // Feedback banners (legato / error)
-                if (_legatoFeedback != null && !_isDemoPlaying)
-                  _feedbackBanner(_legatoFeedback!, AppleViolinTheme.hyperEmerald, Icons.auto_awesome_rounded),
+                if (_controller.legatoFeedback != null && !_controller.isDemoPlaying)
+                  _feedbackBanner(_controller.legatoFeedback!, AppleViolinTheme.hyperEmerald, Icons.auto_awesome_rounded),
 
-                if (_isSoundError && !_isDemoPlaying)
-                  _feedbackBanner(_soundErrorMessage, AppleViolinTheme.crimsonScratch, Icons.warning_amber_rounded),
+                if (_controller.isSoundError && !_controller.isDemoPlaying)
+                  _feedbackBanner(_controller.soundErrorMessage, AppleViolinTheme.crimsonScratch, Icons.warning_amber_rounded),
 
                 // Note Highway View (Бегущая интерактивная дорожка)
                 _buildHighwayTrack(targetNote, isMobile),
@@ -1201,7 +733,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
 
   Widget _buildAudioPlayerBar(bool isMobile) {
     final totalMs = _currentSong.totalDurationMs;
-    final currentMs = _playbackTimeMs.clamp(0, totalMs > 0 ? totalMs : 1);
+    final currentMs = _controller.playbackTimeMs.clamp(0, totalMs > 0 ? totalMs : 1);
     final curSec = currentMs ~/ 1000;
     final totSec = totalMs ~/ 1000;
     final curMin = curSec ~/ 60;
@@ -1214,10 +746,10 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: AppleViolinTheme.highVoltageLime.withValues(alpha: _isDemoPlaying ? 0.08 : 0.04),
+        color: AppleViolinTheme.highVoltageLime.withValues(alpha: _controller.isDemoPlaying ? 0.08 : 0.04),
         borderRadius: AppleViolinTheme.cardRadius,
         border: Border.all(
-          color: _isDemoPlaying
+          color: _controller.isDemoPlaying
               ? AppleViolinTheme.highVoltageLime.withValues(alpha: 0.40)
               : AppleViolinTheme.borderSubtle,
         ),
@@ -1228,31 +760,31 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             children: [
               GestureDetector(
                 onTap: () {
-                  if (_isDemoPlaying) {
-                    if (_isDemoPaused) {
-                      _resumeDemo();
+                  if (_controller.isDemoPlaying) {
+                    if (_controller.isDemoPaused) {
+                      _controller.resumeDemo();
                     } else {
-                      _pauseDemo();
+                      _controller.pauseDemo();
                     }
                   } else {
-                    _startDemo();
+                    _controller.startDemo();
                   }
                 },
                 child: Container(
                   width: 32,
                   height: 32,
                   decoration: BoxDecoration(
-                    color: _isDemoPlaying
+                    color: _controller.isDemoPlaying
                         ? AppleViolinTheme.highVoltageLime
                         : const Color(0x14FFFFFF),
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    (_isDemoPlaying && !_isDemoPaused)
+                    (_controller.isDemoPlaying && !_controller.isDemoPaused)
                         ? Icons.pause_rounded
                         : Icons.play_arrow_rounded,
                     size: 18,
-                    color: _isDemoPlaying
+                    color: _controller.isDemoPlaying
                         ? AppleViolinTheme.voidBg
                         : AppleViolinTheme.headline,
                   ),
@@ -1264,15 +796,15 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      _isDemoPlaying
-                          ? (_isDemoPaused ? "⏸ ПАУЗА: ${_currentSong.title}" : "🔊 ЗВУЧИТ ЭТАЛОН: ${_currentSong.title}")
+                      _controller.isDemoPlaying
+                          ? (_controller.isDemoPaused ? "⏸ ПАУЗА: ${_currentSong.title}" : "🔊 ЗВУЧИТ ЭТАЛОН: ${_currentSong.title}")
                           : "ПРОСЛУШАТЬ ПРОИЗВЕДЕНИЕ",
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AppleViolinTheme.telemetry.copyWith(
                         fontSize: 10,
                         fontWeight: FontWeight.w700,
-                        color: _isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.headline,
+                        color: _controller.isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.headline,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -1294,13 +826,13 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                   fontFamily: AppleViolinTheme.fontMono,
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color: _isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.subtext,
+                  color: _controller.isDemoPlaying ? AppleViolinTheme.highVoltageLime : AppleViolinTheme.subtext,
                 ),
               ),
-              if (_isDemoPlaying) ...[
+              if (_controller.isDemoPlaying) ...[
                 const SizedBox(width: 8),
                 GestureDetector(
-                  onTap: _stopDemo,
+                  onTap: _controller.stopDemo,
                   child: const Icon(
                     Icons.stop_rounded,
                     size: 20,
@@ -1325,7 +857,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
               min: 0.0,
               max: (totalMs > 0 ? totalMs.toDouble() : 1.0),
               onChanged: (val) {
-                _seekDemo(val.toInt());
+                _controller.seekDemo(val.toInt());
               },
             ),
           ),
@@ -1339,7 +871,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   // ---------------------------------------------------------------------------
 
   int get _currentSongIndex {
-    final idx = _availableSongs.indexWhere((s) => s.id == _currentSong.id);
+    final idx = _controller.availableSongs.indexWhere((s) => s.id == _currentSong.id);
     return idx >= 0 ? idx + 1 : 1;
   }
 
@@ -1605,7 +1137,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           Expanded(child: _telemetryCell('ЦЕЛЬ', targetLabel, AppleViolinTheme.highVoltageLime)),
           Expanded(child: _telemetryCell('ЗВУК', heardLabel, AppleViolinTheme.solarAmber)),
           Expanded(child: _telemetryCell('ТОЧНОСТЬ', '$accuracy%', AppleViolinTheme.hyperEmerald)),
-          Expanded(child: _telemetryCell('ШАГ', '${_currentNoteIndex + 1}/$totalNotes', AppleViolinTheme.headline)),
+          Expanded(child: _telemetryCell('ШАГ', '${_controller.currentNoteIndex + 1}/$totalNotes', AppleViolinTheme.headline)),
         ],
       ),
     );
@@ -1681,13 +1213,11 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
   }
 
   Widget _buildSegmentTab(String title, RepertoireCategory cat) {
-    final isSelected = _selectedCategory == cat;
+    final isSelected = _controller.selectedCategory == cat;
     return Expanded(
       child: GestureDetector(
         onTap: () {
-          setState(() {
-            _selectedCategory = cat;
-          });
+          _controller.selectCategory(cat);
         },
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
@@ -1738,10 +1268,10 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
             size: const Size(double.infinity, 100),
             painter: _HighwayPainter(
               song: _currentSong,
-              currentNoteIndex: _currentNoteIndex,
-              playbackTimeMs: _playbackTimeMs,
-              practiceMode: _practiceMode,
-              isDemoPlaying: _isDemoPlaying,
+              currentNoteIndex: _controller.currentNoteIndex,
+              playbackTimeMs: _controller.playbackTimeMs,
+              practiceMode: _controller.practiceMode,
+              isDemoPlaying: _controller.isDemoPlaying,
             ),
           ),
           // Playhead — solar-amber attention line
@@ -1772,7 +1302,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (_isRenderingDdsp) ...[
+        if (_controller.isRenderingDdsp) ...[
           Container(
             margin: const EdgeInsets.only(bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1794,7 +1324,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    _ddspStatus,
+                    _controller.ddspStatus,
                     style: const TextStyle(
                       fontSize: 11,
                       color: Colors.white70,
@@ -1805,7 +1335,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  '${(_ddspProgress * 100).toInt()}%',
+                  '${(_controller.ddspProgress * 100).toInt()}%',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
@@ -1817,58 +1347,58 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
           ),
         ],
         Row(
-      children: [
-        _glassIconButton(icon: Icons.refresh_rounded, onTap: _resetPractice),
-        const SizedBox(width: 8),
-        _actionPill(
-          icon: Icons.shutter_speed_rounded,
-          label: 'x',
-          active: _playbackSpeed != 1.0,
-          activeColor: AppleViolinTheme.appleTeal,
-          onTap: _cyclePlaybackSpeed,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _pillButton(
-            icon: _isDemoPlaying
-                ? (_isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
-                : Icons.headphones_rounded,
-            label: _isDemoPlaying
-                ? (_isDemoPaused ? 'ПРОДОЛЖИТЬ' : 'ПАУЗА')
-                : 'СЛУШАТЬ',
-            primary: false,
-            active: _isDemoPlaying,
-            onTap: () {
-              if (_isDemoPlaying) {
-                if (_isDemoPaused) {
-                  _resumeDemo();
-                } else {
-                  _pauseDemo();
-                }
-              } else {
-                _startDemo();
-              }
-            },
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: _pillButton(
-            icon: _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-            label: _isPlaying ? 'ПАУЗА' : 'ИГРАТЬ',
-            primary: true,
-            onTap: () {
-              if (_isPlaying) {
-                _pausePlayback();
-              } else {
-                _startPlayback();
-              }
-            },
-          ),
+          children: [
+            _glassIconButton(icon: Icons.refresh_rounded, onTap: _controller.resetPractice),
+            const SizedBox(width: 8),
+            _actionPill(
+              icon: Icons.shutter_speed_rounded,
+              label: 'x',
+              active: _controller.playbackSpeed != 1.0,
+              activeColor: AppleViolinTheme.appleTeal,
+              onTap: _controller.cyclePlaybackSpeed,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _pillButton(
+                icon: _controller.isDemoPlaying
+                    ? (_controller.isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
+                    : Icons.headphones_rounded,
+                label: _controller.isDemoPlaying
+                    ? (_controller.isDemoPaused ? 'ПРОДОЛЖИТЬ' : 'ПАУЗА')
+                    : 'СЛУШАТЬ',
+                primary: false,
+                active: _controller.isDemoPlaying,
+                onTap: () {
+                  if (_controller.isDemoPlaying) {
+                    if (_controller.isDemoPaused) {
+                      _controller.resumeDemo();
+                    } else {
+                      _controller.pauseDemo();
+                    }
+                  } else {
+                    _controller.startDemo();
+                  }
+                },
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _pillButton(
+                icon: _controller.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                label: _controller.isPlaying ? 'ПАУЗА' : 'ИГРАТЬ',
+                primary: true,
+                onTap: () {
+                  if (_controller.isPlaying) {
+                    _controller.pausePlayback();
+                  } else {
+                    _controller.startPlayback(onComplete: _showCompletionDialog);
+                  }
+                },
+              ),
+            ),
+          ],
         ),
       ],
-    ),
-    ],
     );
   }
 
@@ -1881,10 +1411,7 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
       padding: const EdgeInsets.only(bottom: 10),
       child: GestureDetector(
         onTap: () {
-          setState(() {
-            _currentSong = song;
-            _resetPractice();
-          });
+          _controller.selectSong(song);
         },
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
@@ -1960,40 +1487,37 @@ class _SongPracticeScreenState extends State<SongPracticeScreen> {
               const SizedBox(width: 10),
               GestureDetector(
                 onTap: () {
-                  if (isCurrent && _isDemoPlaying) {
-                    if (_isDemoPaused) {
-                      _resumeDemo();
+                  if (isCurrent && _controller.isDemoPlaying) {
+                    if (_controller.isDemoPaused) {
+                      _controller.resumeDemo();
                     } else {
-                      _pauseDemo();
+                      _controller.pauseDemo();
                     }
                   } else {
-                    setState(() {
-                      _currentSong = song;
-                      _resetPractice();
-                    });
-                    _startDemo();
+                    _controller.selectSong(song);
+                    _controller.startDemo();
                   }
                 },
                 child: Container(
                   width: 36,
                   height: 36,
                   decoration: BoxDecoration(
-                    color: (isCurrent && _isDemoPlaying)
+                    color: (isCurrent && _controller.isDemoPlaying)
                         ? AppleViolinTheme.highVoltageLime
                         : const Color(0x0EFFFFFF),
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: (isCurrent && _isDemoPlaying)
+                      color: (isCurrent && _controller.isDemoPlaying)
                           ? AppleViolinTheme.highVoltageLime
                           : AppleViolinTheme.borderSubtle,
                     ),
                   ),
                   child: Icon(
-                    (isCurrent && _isDemoPlaying)
-                        ? (_isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
+                    (isCurrent && _controller.isDemoPlaying)
+                        ? (_controller.isDemoPaused ? Icons.play_arrow_rounded : Icons.pause_rounded)
                         : Icons.headphones_rounded,
                     size: 16,
-                    color: (isCurrent && _isDemoPlaying)
+                    color: (isCurrent && _controller.isDemoPlaying)
                         ? AppleViolinTheme.voidBg
                         : AppleViolinTheme.headline,
                   ),
