@@ -1,11 +1,9 @@
 import 'dart:math' as math;
-import 'dart:async';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
-import 'audio_engine.dart';
+import 'controllers/audio_recognition_controller.dart';
 import 'music_theory.dart';
-import 'theme/apple_violin_theme.dart';
 import 'services/settings_service.dart';
+import 'theme/apple_violin_theme.dart';
 import 'ui/song_practice_screen.dart';
 import 'ui/synth_test_panel.dart';
 import 'ui/trainer_screen.dart';
@@ -47,149 +45,43 @@ class MainViolinScreen extends StatefulWidget {
 }
 
 class _MainViolinScreenState extends State<MainViolinScreen> {
-  final AudioEngine _audioEngine = AudioEngine();
-  StreamSubscription<PitchResult>? _pitchSub;
-  final ValueNotifier<DetectedNoteInfo?> _noteNotifier = ValueNotifier<DetectedNoteInfo?>(null);
+  late final AudioRecognitionController _audioController;
   SettingsService? _settings;
 
   int _selectedTabIndex = 2; // Direct to SongPracticeScreen
-  ViolinString? _selectedTunerString;
-  double _concertA4Hz = 440.0;
-  bool _isMicActive = false;
   final bool _isMobileFrame = false;
   final bool _showDebugSynth = false;
-
-  DetectedNoteInfo? _currentNote;
-  double _smoothedHz = 0.0;
-  DateTime _lastNoteTime = DateTime.now();
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-    _initAudio();
+    _audioController = AudioRecognitionController();
+    _audioController.addListener(_onAudioControllerChanged);
+    _initApp();
   }
 
-  Future<void> _loadSettings() async {
+  Future<void> _initApp() async {
     final s = await SettingsService.init();
     if (mounted) {
       setState(() {
         _settings = s;
-        _concertA4Hz = s.concertA4Hz;
         _selectedTabIndex = 2; // Direct to SongPracticeScreen for instant test
       });
+      _audioController.setConcertA4Hz(s.concertA4Hz);
     }
+    await _audioController.initialize();
   }
 
-  Future<void> _initAudio() async {
-    try {
-      final stream = await _audioEngine.start();
-      _pitchSub = stream.listen(_onPitchResult);
-
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-        await AudioEngine.ensureRecordAudioPermission();
-      }
-
-      final micStarted = _audioEngine.startMic();
-      if (mounted) {
-        setState(() {
-          _isMicActive = micStarted;
-        });
-      }
-    } catch (_) {
-      // Audio engine error
-    }
-  }
-
-  void _onPitchResult(PitchResult result) {
-    if (_audioEngine.isTonePlaying) {
-      // Do not evaluate speaker output as student playing
-      return;
-    }
-    final now = DateTime.now();
-    // Filter faint phantom sounds, background noise & room hum
-    if (result.frequencyHz <= 0 || result.confidence < 0.38) {
-      if (now.difference(_lastNoteTime).inMilliseconds > 180) {
-        if (_currentNote != null || _noteNotifier.value != null) {
-          _noteNotifier.value = null;
-          _smoothedHz = 0.0;
-          if (mounted) {
-            setState(() {
-              _currentNote = null;
-            });
-          }
-        }
-      }
-      return;
-    }
-
-    _lastNoteTime = now;
-
-    // Logarithmic cents distance filter for pitch stabilization:
-    // Avoids resetting on small intervals in high registers, while immediately
-    // responding to distinct note changes (> 75 cents) or initial onsets.
-    double deltaCents = 999.0;
-    if (_smoothedHz > 0.0 && result.frequencyHz > 0.0) {
-      deltaCents = (1200.0 * (math.log(result.frequencyHz / _smoothedHz) / math.ln2)).abs();
-    }
-
-    if (_smoothedHz == 0.0 || deltaCents > 75.0) {
-      _smoothedHz = result.frequencyHz;
-    } else {
-      // Smooth micro-pitch variations (vibrato and bow jitter) within the same note
-      _smoothedHz = _smoothedHz * 0.30 + result.frequencyHz * 0.70;
-    }
-
-    final note = MusicTheory.analyzePitch(
-      _smoothedHz,
-      result.confidence,
-      result.isScratching,
-      targetString: _selectedTabIndex == 0 ? _selectedTunerString : null,
-      concertA4Hz: _concertA4Hz,
-    );
-
-    _noteNotifier.value = note;
+  void _onAudioControllerChanged() {
     if (mounted) {
-      setState(() {
-        _currentNote = note;
-      });
-    }
-  }
-
-  void _toggleMic(bool enable) async {
-    if (enable) {
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-        final hasPermission = await AudioEngine.ensureRecordAudioPermission();
-        if (!hasPermission) {
-          if (mounted) {
-            setState(() {
-              _isMicActive = false;
-            });
-          }
-          return;
-        }
-      }
-      final ok = _audioEngine.startMic();
-      if (mounted) {
-        setState(() {
-          _isMicActive = ok;
-        });
-      }
-    } else {
-      _audioEngine.stopMic();
-      if (mounted) {
-        setState(() {
-          _isMicActive = false;
-        });
-      }
+      setState(() {});
     }
   }
 
   @override
   void dispose() {
-    _pitchSub?.cancel();
-    _noteNotifier.dispose();
-    _audioEngine.dispose();
+    _audioController.removeListener(_onAudioControllerChanged);
+    _audioController.dispose();
     super.dispose();
   }
 
@@ -211,32 +103,27 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
                 index: _selectedTabIndex,
                 children: [
                   TunerScreen(
-                    audioEngine: _audioEngine,
-                    currentNote: _currentNote,
-                    selectedString: _selectedTunerString,
-                    concertA4Hz: _concertA4Hz,
+                    audioEngine: _audioController.audioEngine,
+                    currentNote: _audioController.currentNote,
+                    selectedString: _audioController.selectedTunerString,
+                    concertA4Hz: _audioController.concertA4Hz,
                     isMobileMode: true,
                     onConcertPitchChanged: (pitch) {
-                      setState(() {
-                        _concertA4Hz = pitch;
-                      });
-                      _settings?.setConcertA4Hz(pitch);
+                      _audioController.setConcertA4Hz(pitch);
                     },
                     onStringSelected: (str) {
-                      setState(() {
-                        _selectedTunerString = str;
-                      });
+                      _audioController.setSelectedTunerString(str);
                     },
                   ),
                   TrainerScreen(
-                    audioEngine: _audioEngine,
-                    currentNote: _currentNote,
-                    noteNotifier: _noteNotifier,
+                    audioEngine: _audioController.audioEngine,
+                    currentNote: _audioController.currentNote,
+                    noteNotifier: _audioController.noteNotifier,
                   ),
                   SongPracticeScreen(
-                    audioEngine: _audioEngine,
-                    currentNote: _currentNote,
-                    noteNotifier: _noteNotifier,
+                    audioEngine: _audioController.audioEngine,
+                    currentNote: _audioController.currentNote,
+                    noteNotifier: _audioController.noteNotifier,
                     isMobileMode: true,
                   ),
                 ],
@@ -246,10 +133,10 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
             // Collapsible Debug Synth Panel (if toggled)
             if (_showDebugSynth)
               SynthTestPanel(
-                audioEngine: _audioEngine,
-                isMicActive: _isMicActive,
+                audioEngine: _audioController.audioEngine,
+                isMicActive: _audioController.isMicActive,
                 isMobileMode: true,
-                onMicToggle: _toggleMic,
+                onMicToggle: (enable) => _audioController.toggleMic(enable),
               ),
 
             // Apple HIG Bottom Navigation Bar & Home Bar Indicator
@@ -333,6 +220,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
         setState(() {
           _selectedTabIndex = index;
         });
+        _selectedTabIndex = index;
         _settings?.setLastTab(index);
       },
       behavior: HitTestBehavior.opaque,
