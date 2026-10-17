@@ -1,14 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../audio_engine.dart';
+import '../controllers/tuner_controller.dart';
 import '../music_theory.dart';
 import 'widgets/apple_precision_dial.dart';
 import 'widgets/musical_staff_view.dart';
 
-enum TunerMode {
-  tuner,    // Определение и настройка открытых струн (Тюнер)
-  accuracy, // Микро-интонация и хроматическая точность нот (Точность)
-}
+export '../controllers/tuner_controller.dart' show TunerMode;
 
 class TunerScreen extends StatefulWidget {
   final AudioEngine audioEngine;
@@ -18,6 +16,7 @@ class TunerScreen extends StatefulWidget {
   final double concertA4Hz;
   final ValueChanged<double> onConcertPitchChanged;
   final bool isMobileMode;
+  final TunerController? controller;
 
   const TunerScreen({
     super.key,
@@ -28,6 +27,7 @@ class TunerScreen extends StatefulWidget {
     required this.concertA4Hz,
     required this.onConcertPitchChanged,
     this.isMobileMode = false,
+    this.controller,
   });
 
   @override
@@ -35,35 +35,52 @@ class TunerScreen extends StatefulWidget {
 }
 
 class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStateMixin {
-  TunerMode _activeMode = TunerMode.tuner;
+  late final TunerController _controller;
+  bool _ownsController = false;
 
-  // Smoothing for bow pressure & tone smoothness visualizers
-  double _smoothBowPressure = 0.5; // 0.0 = flautando/weak, 0.5 = ideal, 1.0 = scratch
-  double _smoothStability = 0.0;   // 0.0 to 1.0 confidence/smoothness
+  @override
+  void initState() {
+    super.initState();
+    if (widget.controller != null) {
+      _controller = widget.controller!;
+    } else {
+      _controller = TunerController(
+        initialSelectedString: widget.selectedString,
+        initialConcertA4Hz: widget.concertA4Hz,
+      );
+      _ownsController = true;
+    }
+    _controller.updateWithNote(widget.currentNote);
+    _controller.addListener(_onControllerChanged);
+  }
+
+  void _onControllerChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
 
   @override
   void didUpdateWidget(TunerScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.currentNote != widget.currentNote) {
-      _updatePhysicsMetrics(widget.currentNote);
+      _controller.updateWithNote(widget.currentNote);
+    }
+    if (oldWidget.selectedString != widget.selectedString) {
+      _controller.setSelectedString(widget.selectedString);
+    }
+    if ((oldWidget.concertA4Hz - widget.concertA4Hz).abs() > 0.01) {
+      _controller.setConcertA4Hz(widget.concertA4Hz);
     }
   }
 
-  void _updatePhysicsMetrics(DetectedNoteInfo? note) {
-    final isScratching = note?.isScratching ?? false;
-    if (note != null && note.rawHz > 0) {
-      if (isScratching) {
-        _smoothBowPressure = _smoothBowPressure * 0.3 + 0.95 * 0.7;
-      } else if (note.confidence < 0.65) {
-        _smoothBowPressure = _smoothBowPressure * 0.5 + 0.25 * 0.5;
-      } else {
-        _smoothBowPressure = _smoothBowPressure * 0.4 + 0.52 * 0.6;
-      }
-      _smoothStability = _smoothStability * 0.35 + note.confidence.clamp(0.0, 1.0) * 0.65;
-    } else {
-      _smoothBowPressure = _smoothBowPressure * 0.85 + 0.40 * 0.15;
-      _smoothStability = _smoothStability * 0.8;
+  @override
+  void dispose() {
+    _controller.removeListener(_onControllerChanged);
+    if (_ownsController) {
+      _controller.dispose();
     }
+    super.dispose();
   }
 
   @override
@@ -73,39 +90,12 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
     final isScratching = note?.isScratching ?? false;
     final isMobile = widget.isMobileMode;
 
-// Dynamic physics metrics updated in didUpdateWidget
-
-    // --- MODE 1: ТЮНЕР (Настройка струн) ---
-    final ViolinString effectiveTunerString;
-    if (widget.selectedString != null) {
-      effectiveTunerString = widget.selectedString!;
-    } else if (note != null && note.rawHz > 0) {
-      effectiveTunerString = _findClosestOpenString(note.rawHz, widget.concertA4Hz);
-    } else {
-      effectiveTunerString = ViolinString.a; // Default standard A4
-    }
-
-    final tunerTargetHz = effectiveTunerString.openHz(widget.concertA4Hz);
-    final tunerTargetMidi = effectiveTunerString.openMidi;
-    final double tunerCents;
-    if (note != null && note.rawHz > 0) {
-      // Calculate octave-invariant cents to target string
-      tunerCents = _calculateHarmonicCents(note.rawHz, tunerTargetHz);
-    } else {
-      tunerCents = 0.0;
-    }
-    final isTunerInTune = note != null && tunerCents.abs() <= 5.0;
-
-    // --- MODE 2: ТОЧНОСТЬ (Интонация всех нот) ---
-    final accuracyCents = note?.cents ?? 0.0;
-    final isAccuracyInTune = note?.isInTune ?? false;
-    final int? accuracyTargetMidi = note?.midiNote;
-
-    // Values used by dial and staff according to current mode
-    final double activeCents = _activeMode == TunerMode.tuner ? tunerCents : accuracyCents;
-    final bool activeInTune = _activeMode == TunerMode.tuner ? isTunerInTune : isAccuracyInTune;
-    final int? activeStaffTargetMidi = _activeMode == TunerMode.tuner ? tunerTargetMidi : accuracyTargetMidi;
-    final int? activeStaffPlayedMidi = note?.midiNote;
+    final effectiveTunerString = _controller.effectiveTunerString;
+    final tunerTargetHz = _controller.tunerTargetHz;
+    final activeCents = _controller.activeCents;
+    final activeInTune = _controller.activeInTune;
+    final activeStaffTargetMidi = _controller.activeStaffTargetMidi;
+    final activeStaffPlayedMidi = _controller.activeStaffPlayedMidi;
 
     return SingleChildScrollView(
       physics: const BouncingScrollPhysics(),
@@ -130,22 +120,22 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
             isListening: isListening,
             cents: activeCents,
             isInTune: activeInTune,
-            targetString: _activeMode == TunerMode.tuner ? effectiveTunerString : null,
+            targetString: _controller.activeMode == TunerMode.tuner ? effectiveTunerString : null,
             size: isMobile ? 220 : 246,
-            customSublabel: _activeMode == TunerMode.tuner
-                ? (widget.selectedString != null
+            customSublabel: _controller.activeMode == TunerMode.tuner
+                ? (_controller.selectedString != null
                     ? 'ФИКСИРОВАННАЯ СТРУНА ${effectiveTunerString.solfegeName.toUpperCase()}'
                     : 'АВТО-СТРУНА ${effectiveTunerString.solfegeName.toUpperCase()}')
                 : (note != null
                     ? 'ЧИСТОТА ИНТОНАЦИИ'
                     : 'ОЖИДАНИЕ НОТЫ'),
-            customSolfege: _activeMode == TunerMode.tuner
+            customSolfege: _controller.activeMode == TunerMode.tuner
                 ? effectiveTunerString.solfegeName
                 : (note?.solfegeBase ?? '--'),
-            customOctave: _activeMode == TunerMode.tuner
+            customOctave: _controller.activeMode == TunerMode.tuner
                 ? '${(effectiveTunerString.openMidi ~/ 12) - 1}'
                 : (note != null ? '${(note.midiNote ~/ 12) - 1}' : ''),
-            customFrequencyHz: _activeMode == TunerMode.tuner
+            customFrequencyHz: _controller.activeMode == TunerMode.tuner
                 ? (note?.rawHz ?? tunerTargetHz)
                 : (note?.rawHz ?? 0.0),
           ),
@@ -154,7 +144,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
           // 4. Dynamic Contextual Guidance Banner (Peg advice or Finger adjustment)
           _buildContextGuidanceBanner(
             note: note,
-            activeMode: _activeMode,
+            activeMode: _controller.activeMode,
             cents: activeCents,
             isInTune: activeInTune,
             isScratching: isScratching,
@@ -168,12 +158,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
             playedMidi: activeStaffPlayedMidi,
             isScratching: isScratching,
             isInTune: activeInTune,
-            noteLabel: _getStaffNoteLabel(
-              activeMode: _activeMode,
-              note: note,
-              targetString: effectiveTunerString,
-              tunerTargetHz: tunerTargetHz,
-            ),
+            noteLabel: _controller.staffNoteLabel,
             height: isMobile ? 86 : 96,
             compact: isMobile,
           ),
@@ -186,10 +171,10 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
           // 7. MODE-SPECIFIC SECTION:
           // In "Тюнер" mode: Physical strings with realistic thicknesses (G, D, A, E)
           // In "Точность" mode: Chromatic register & fingerboard intonation tracker
-          if (_activeMode == TunerMode.tuner)
+          if (_controller.activeMode == TunerMode.tuner)
             _buildPhysicalStringsSelector(isMobile, effectiveTunerString)
           else
-            _buildAccuracyInfoPanel(isMobile, note, activeCents, isAccuracyInTune),
+            _buildAccuracyInfoPanel(isMobile, note, activeCents, _controller.activeInTune),
 
           const SizedBox(height: 14),
 
@@ -249,7 +234,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
               ),
               const SizedBox(height: 3),
               Text(
-                _activeMode == TunerMode.tuner ? 'Тюнер' : 'Точность',
+                _controller.activeMode == TunerMode.tuner ? 'Тюнер' : 'Точность',
                 style: const TextStyle(
                   fontSize: 28,
                   fontWeight: FontWeight.w900,
@@ -267,8 +252,8 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
         GestureDetector(
           onTap: () {
             HapticFeedback.selectionClick();
-            final nextPitch = (widget.concertA4Hz - 440.0).abs() < 0.1 ? 442.0 : 440.0;
-            widget.onConcertPitchChanged(nextPitch);
+            _controller.toggleConcertA4Pitch();
+            widget.onConcertPitchChanged(_controller.concertA4Hz);
           },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -290,7 +275,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
                 const Icon(Icons.tune_rounded, size: 12, color: Color(0xFF38BDF8)),
                 const SizedBox(width: 5),
                 Text(
-                  'A4 = ${widget.concertA4Hz.toInt()} Hz',
+                  'A4 = ${_controller.concertA4Hz.toInt()} Hz',
                   style: const TextStyle(
                     fontFamily: 'monospace',
                     fontSize: 11,
@@ -334,12 +319,10 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
               title: 'Тюнер',
               subtitle: 'Настройка струн',
               icon: Icons.adjust_rounded,
-              isSelected: _activeMode == TunerMode.tuner,
+              isSelected: _controller.activeMode == TunerMode.tuner,
               onTap: () {
                 HapticFeedback.selectionClick();
-                setState(() {
-                  _activeMode = TunerMode.tuner;
-                });
+                _controller.setActiveMode(TunerMode.tuner);
               },
             ),
           ),
@@ -349,12 +332,10 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
               title: 'Точность',
               subtitle: 'Интонация нот',
               icon: Icons.center_focus_strong_rounded,
-              isSelected: _activeMode == TunerMode.accuracy,
+              isSelected: _controller.activeMode == TunerMode.accuracy,
               onTap: () {
                 HapticFeedback.selectionClick();
-                setState(() {
-                  _activeMode = TunerMode.accuracy;
-                });
+                _controller.setActiveMode(TunerMode.accuracy);
               },
             ),
           ),
@@ -448,96 +429,65 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
     required bool isScratching,
     required ViolinString targetString,
   }) {
-    Color bgColor = const Color(0xFF141724);
-    Color borderColor = Colors.white.withValues(alpha: 0.07);
-    Color accentColor = const Color(0xFF94A3B8);
-    IconData icon = Icons.mic_none_rounded;
-    String mainText = 'Сыграйте звук смычком';
-    String subText = 'Микрофон ожидает извлечения ноты';
+    String headline;
+    String subtext;
+    IconData icon;
+    Color accentColor;
 
-    if (note == null || note.rawHz <= 0) {
-      if (activeMode == TunerMode.tuner) {
-        mainText = widget.selectedString != null
-            ? 'Сыграйте струну ${targetString.solfegeName} (${targetString.name})'
-            : 'Сыграйте любую открытую струну';
-        subText = 'Тюнер зафиксирует строй струны';
-      } else {
-        mainText = 'Извлеките любую ноту смычком';
-        subText = 'Анализ чистоты ладовой интонации';
-      }
-    } else if (isScratching && cents.abs() > 18.0) {
-      bgColor = const Color(0x22EF4444);
-      borderColor = const Color(0x66EF4444);
-      accentColor = const Color(0xFFEF4444);
+    if (isScratching) {
+      headline = 'Скрип волоса смычка (Scratch)';
+      subtext = 'Ослабьте нажим указательного пальца на смычок';
       icon = Icons.warning_amber_rounded;
-      mainText = 'Скрип: ослабьте нажим смычка';
-      subText = 'Чрезмерное давление смычка искажает тон';
-    } else if (activeMode == TunerMode.tuner) {
-      // Tuner mode: Peg advice (Натянуть / Ослабить / В строе)
-      if (isInTune) {
-        bgColor = const Color(0x2210B981);
-        borderColor = const Color(0x6610B981);
-        accentColor = const Color(0xFF10B981);
-        icon = Icons.check_circle_rounded;
-        mainText = 'В строе! Струна настроена';
-        subText = 'Отклонение в пределах нормы (${cents > 0 ? "+" : ""}${cents.toStringAsFixed(1)}¢)';
-      } else if (cents < -5.0) {
-        bgColor = const Color(0x22F59E0B);
-        borderColor = const Color(0x66F59E0B);
-        accentColor = const Color(0xFFF59E0B);
-        icon = Icons.arrow_upward_rounded;
-        mainText = '<<< Натянуть колок (низит на ${cents.abs().toStringAsFixed(0)}¢)';
-        subText = 'Поверните колок от себя / подтяните машинку';
-      } else {
-        bgColor = const Color(0x22F59E0B);
-        borderColor = const Color(0x66F59E0B);
-        accentColor = const Color(0xFFF59E0B);
-        icon = Icons.arrow_downward_rounded;
-        mainText = 'Ослабить колок (высит на ${cents.toStringAsFixed(0)}¢) >>>';
-        subText = 'Поверните колок на себя / ослабьте машинку';
-      }
+      accentColor = const Color(0xFFEF4444);
+    } else if (note == null || note.rawHz <= 0) {
+      headline = activeMode == TunerMode.tuner
+          ? 'Проведите смычком по струне'
+          : 'Сыграйте любую ноту';
+      subtext = activeMode == TunerMode.tuner
+          ? 'Easy Violin DSP автоматически распознает струну'
+          : 'Детектор проверит чистоту интонации и аппликатуру';
+      icon = Icons.graphic_eq_rounded;
+      accentColor = const Color(0xFF71717A);
+    } else if (isInTune) {
+      headline = 'Идеально в строю! (±${cents.abs().toStringAsFixed(0)}¢)';
+      subtext = activeMode == TunerMode.tuner
+          ? 'Струна ${targetString.solfegeName} звучит безупречно чисто'
+          : 'Нота ${note.solfegeName} точно в строю';
+      icon = Icons.check_circle_rounded;
+      accentColor = const Color(0xFFD4FF00); // High-Voltage Lime
+    } else if (cents > 0) {
+      final chevronCount = (cents.abs() / 15.0).ceil().clamp(1, 3);
+      headline = activeMode == TunerMode.tuner
+          ? 'Высит (+${cents.toStringAsFixed(0)}¢) ${">" * chevronCount}'
+          : 'Нота высит (+${cents.toStringAsFixed(0)}¢)';
+      subtext = activeMode == TunerMode.tuner
+          ? 'Ослабьте колок или машинку против часовой стрелки'
+          : 'Сдвиньте палец чуть ближе к порожку (вниз по грифу)';
+      icon = Icons.arrow_downward_rounded;
+      accentColor = const Color(0xFFF59E0B);
     } else {
-      // Accuracy mode: Finger positioning guidance
-      if (isInTune) {
-        bgColor = const Color(0x22D4FF00);
-        borderColor = const Color(0x66D4FF00);
-        accentColor = const Color(0xFFD4FF00);
-        icon = Icons.verified_rounded;
-        mainText = 'Чистая интонация! Точное попадание';
-        subText = '${note.solfegeName} (${note.noteName}) • ${cents > 0 ? "+" : ""}${cents.toStringAsFixed(1)}¢';
-      } else if (cents < -5.0) {
-        bgColor = const Color(0x2238BDF8);
-        borderColor = const Color(0x6638BDF8);
-        accentColor = const Color(0xFF38BDF8);
-        icon = Icons.arrow_forward_rounded;
-        mainText = 'Сдвиньте палец к подставке (низит на ${cents.abs().toStringAsFixed(0)}¢)';
-        subText = note.bestFingering != null
-            ? '${note.bestFingering!.finger.label} на ${note.bestFingering!.string.name}-струне'
-            : 'Увеличьте позицию пальца';
-      } else {
-        bgColor = const Color(0x22F59E0B);
-        borderColor = const Color(0x66F59E0B);
-        accentColor = const Color(0xFFF59E0B);
-        icon = Icons.arrow_back_rounded;
-        mainText = 'Сдвиньте палец к порожку (высит на ${cents.toStringAsFixed(0)}¢)';
-        subText = note.bestFingering != null
-            ? '${note.bestFingering!.finger.label} на ${note.bestFingering!.string.name}-струне'
-            : 'Сдвиньте палец ближе к началу грифа';
-      }
+      final chevronCount = (cents.abs() / 15.0).ceil().clamp(1, 3);
+      headline = activeMode == TunerMode.tuner
+          ? 'Низит (${cents.toStringAsFixed(0)}¢) ${"<" * chevronCount}'
+          : 'Нота низит (${cents.toStringAsFixed(0)}¢)';
+      subtext = activeMode == TunerMode.tuner
+          ? 'Натяните колок или машинку по часовой стрелке'
+          : 'Продвиньте палец чуть ближе к подставке (вверх по грифу)';
+      icon = Icons.arrow_upward_rounded;
+      accentColor = const Color(0xFF38BDF8);
     }
 
     return Container(
       width: double.infinity,
-      constraints: const BoxConstraints(maxWidth: 420),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: bgColor,
+        color: const Color(0xFF141724),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor),
+        border: Border.all(color: accentColor.withValues(alpha: 0.3)),
         boxShadow: [
           BoxShadow(
             color: accentColor.withValues(alpha: 0.08),
-            blurRadius: 14,
+            blurRadius: 12,
             spreadRadius: 1,
           ),
         ],
@@ -547,8 +497,8 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
               color: accentColor.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
             ),
             child: Icon(icon, color: accentColor, size: 18),
           ),
@@ -559,26 +509,21 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  mainText,
+                  headline,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: FontWeight.w800,
                     letterSpacing: -0.2,
-                    color: accentColor == const Color(0xFF94A3B8) ? Colors.white : accentColor,
+                    color: accentColor,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  subText,
+                  subtext,
                   style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w500,
+                    fontSize: 10.5,
                     color: Color(0xFF94A3B8),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
@@ -589,33 +534,13 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
   }
 
   // ---------------------------------------------------------------------------
-  // 5. Musical Staff View Label Generator
-  // ---------------------------------------------------------------------------
-  String _getStaffNoteLabel({
-    required TunerMode activeMode,
-    required DetectedNoteInfo? note,
-    required ViolinString targetString,
-    required double tunerTargetHz,
-  }) {
-    if (activeMode == TunerMode.tuner) {
-      if (note != null && note.rawHz > 0) {
-        return 'Цель: ${targetString.solfegeName} (${targetString.name}) • Факт: ${note.rawHz.toStringAsFixed(1)} Hz';
-      }
-      return 'Цель: Струна ${targetString.solfegeName} (${tunerTargetHz.toStringAsFixed(1)} Hz)';
-    } else {
-      if (note != null && note.rawHz > 0) {
-        return '${note.solfegeName} / ${note.noteName} (${note.rawHz.toStringAsFixed(1)} Hz)';
-      }
-      return 'Сыграйте ноту для отображения на стане';
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // 6. ASYMMETRIC BENTO GRID: Bow Pressure & Sound Smoothness
   // ---------------------------------------------------------------------------
   Widget _buildBentoBowingAcoustics(bool isMobile) {
     final note = widget.currentNote;
     final isScratching = note?.isScratching ?? false;
+    final smoothBowPressure = _controller.smoothBowPressure;
+    final smoothStability = _controller.smoothStability;
 
     // Bow pressure metrics
     String pressureText;
@@ -623,10 +548,10 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
     if (note == null || note.rawHz <= 0) {
       pressureText = 'Ожидание';
       pressureColor = const Color(0xFF71717A);
-    } else if (isScratching || _smoothBowPressure >= 0.85) {
+    } else if (isScratching || smoothBowPressure >= 0.85) {
       pressureText = 'ПЕРЕЖИМ';
       pressureColor = const Color(0xFFEF4444);
-    } else if (_smoothBowPressure < 0.38) {
+    } else if (smoothBowPressure < 0.38) {
       pressureText = 'Недожим';
       pressureColor = const Color(0xFFF59E0B);
     } else {
@@ -635,7 +560,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
     }
 
     // Sound smoothness metrics
-    final int stabilityPct = (_smoothStability * 100).toInt().clamp(0, 100);
+    final int stabilityPct = (smoothStability * 100).toInt().clamp(0, 100);
     String stabilityText;
     Color stabilityColor;
     if (note == null || note.rawHz <= 0) {
@@ -727,7 +652,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
                     // Live Needle indicator
                     LayoutBuilder(
                       builder: (context, constraints) {
-                        final posX = (_smoothBowPressure.clamp(0.0, 1.0) * (constraints.maxWidth - 12))
+                        final posX = (smoothBowPressure.clamp(0.0, 1.0) * (constraints.maxWidth - 12))
                             .clamp(0.0, constraints.maxWidth - 12);
                         return Padding(
                           padding: EdgeInsets.only(left: posX),
@@ -825,7 +750,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
                       ),
                     ),
                     FractionallySizedBox(
-                      widthFactor: (_smoothStability).clamp(0.02, 1.0),
+                      widthFactor: (smoothStability).clamp(0.02, 1.0),
                       child: Container(
                         height: 5,
                         decoration: BoxDecoration(
@@ -865,11 +790,6 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
   // 7A. Physical Strings Selector with Real Thicknesses (G, D, A, E)
   // ---------------------------------------------------------------------------
   Widget _buildPhysicalStringsSelector(bool isMobile, ViolinString currentActiveString) {
-    // String specifications with physical string thickness (in pixels)
-    // IV Соль: 4.8 px (wound silver / gut)
-    // III Ре:   3.4 px (wound aluminum)
-    // II  Ля:   2.2 px (synthetic / perlon core)
-    // I   Ми:   1.2 px (plain high-tensile steel wire)
     final stringsConfig = [
       (ViolinString.g, 'Соль', 'G3', '196.0 Hz', 'IV', 4.8, const Color(0xFFEF4444)),
       (ViolinString.d, 'Ре',   'D4', '293.7 Hz', 'III', 3.4, const Color(0xFFF59E0B)),
@@ -898,23 +818,23 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: widget.selectedString != null
+                  color: _controller.selectedString != null
                       ? const Color(0xFFD4FF00).withValues(alpha: 0.15)
                       : Colors.white.withValues(alpha: 0.05),
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color: widget.selectedString != null
+                    color: _controller.selectedString != null
                         ? const Color(0xFFD4FF00).withValues(alpha: 0.4)
                         : Colors.transparent,
                   ),
                 ),
                 child: Text(
-                  widget.selectedString != null ? 'ЗАХВАТ СТРУНЫ' : 'АВТО-ВЫБОР',
+                  _controller.selectedString != null ? 'ЗАХВАТ СТРУНЫ' : 'АВТО-ВЫБОР',
                   style: TextStyle(
                     fontFamily: 'monospace',
                     fontSize: 9,
                     fontWeight: FontWeight.w700,
-                    color: widget.selectedString != null
+                    color: _controller.selectedString != null
                         ? const Color(0xFFD4FF00)
                         : const Color(0xFF71717A),
                   ),
@@ -928,8 +848,8 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
         Row(
           children: stringsConfig.map((cfg) {
             final (vStr, solfege, noteName, hz, roman, thickness, color) = cfg;
-            final isExplicitlySelected = widget.selectedString == vStr;
-            final isAutoTarget = widget.selectedString == null && currentActiveString == vStr;
+            final isExplicitlySelected = _controller.selectedString == vStr;
+            final isAutoTarget = _controller.selectedString == null && currentActiveString == vStr;
             final isHighlighted = isExplicitlySelected || isAutoTarget;
 
             return Expanded(
@@ -938,8 +858,8 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
                 child: GestureDetector(
                   onTap: () {
                     HapticFeedback.selectionClick();
-                    // Toggle selection: tap again resets to Auto
-                    widget.onStringSelected(isExplicitlySelected ? null : vStr);
+                    _controller.setSelectedString(vStr, toggle: true);
+                    widget.onStringSelected(_controller.selectedString);
                   },
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 200),
@@ -1225,14 +1145,11 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
           child: ElevatedButton.icon(
             onPressed: () {
               HapticFeedback.lightImpact();
-              final targetHz = _activeMode == TunerMode.tuner
-                  ? tunerTargetHz
-                  : (widget.currentNote?.targetHz ?? 440.0);
-              widget.audioEngine.playSyntheticNote(targetHz, 1.8);
+              _controller.playActiveTargetTone(widget.audioEngine);
             },
             icon: const Icon(Icons.volume_up_rounded, size: 18, color: Color(0xFF38BDF8)),
             label: Text(
-              _activeMode == TunerMode.tuner
+              _controller.activeMode == TunerMode.tuner
                   ? 'Слушать струну ${effectiveString.solfegeName} (${tunerTargetHz.toInt()} Hz)'
                   : 'Слушать эталон ноты',
               style: const TextStyle(
@@ -1258,7 +1175,7 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
         ElevatedButton(
           onPressed: () {
             HapticFeedback.lightImpact();
-            widget.audioEngine.playSyntheticNote(widget.concertA4Hz, 1.2);
+            _controller.playConcertA4Tone(widget.audioEngine);
           },
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFF141724),
@@ -1269,9 +1186,9 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
             ),
             elevation: 0,
           ),
-          child: const Text(
-            '440',
-            style: TextStyle(
+          child: Text(
+            '${_controller.concertA4Hz.toInt()}',
+            style: const TextStyle(
               fontFamily: 'monospace',
               fontWeight: FontWeight.w800,
               fontSize: 13,
@@ -1281,40 +1198,5 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
         ),
       ],
     );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Helper: Closest Open String Detection
-  // ---------------------------------------------------------------------------
-  ViolinString _findClosestOpenString(double hz, double concertA4Hz) {
-    ViolinString closest = ViolinString.a;
-    double minHarmonicDistance = double.infinity;
-
-    for (final str in ViolinString.inOrder) {
-      final targetHz = str.openHz(concertA4Hz);
-      final cents = _calculateHarmonicCents(hz, targetHz).abs();
-      if (cents < minHarmonicDistance) {
-        minHarmonicDistance = cents;
-        closest = str;
-      }
-    }
-    return closest;
-  }
-
-  /// Calculates cents distance allowing 2nd and 3rd harmonics to align to fundamental
-  double _calculateHarmonicCents(double hz, double targetHz) {
-    if (hz <= 0 || targetHz <= 0) return 0.0;
-    double effective = hz;
-    final ratio = hz / targetHz;
-
-    if (ratio >= 1.88 && ratio <= 2.12) {
-      effective = hz / 2.0; // Octave harmonic
-    } else if (ratio >= 2.82 && ratio <= 3.18) {
-      effective = hz / 3.0; // Twelfth harmonic
-    } else if (ratio >= 0.47 && ratio <= 0.53) {
-      effective = hz * 2.0; // Subharmonic
-    }
-
-    return MusicTheory.calculateCents(effective, targetHz).clamp(-100.0, 100.0);
   }
 }
