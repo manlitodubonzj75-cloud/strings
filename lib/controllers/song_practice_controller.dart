@@ -194,9 +194,9 @@ class SongPracticeController extends ChangeNotifier {
     notifyListeners();
 
     if (_practiceMode == PracticeMode.playAlong) {
-      _playbackTimer = Timer.periodic(const Duration(milliseconds: 30), (_) {
+      _playbackTimer = Timer.periodic(const Duration(milliseconds: 20), (_) {
         if (!_isSoundError) {
-          _playbackTimeMs += (30 * _playbackSpeed).round();
+          _playbackTimeMs += (20 * _playbackSpeed).round();
 
           if (_scoreController.loopRange.isEnabled) {
             final loopEnd = _scoreController.loopRange.getEndTimeMs(_scoreController.measures);
@@ -209,6 +209,12 @@ class SongPracticeController extends ChangeNotifier {
               }
               _currentNoteIndex = idx.clamp(0, _currentSong.notes.length - 1);
             }
+          }
+
+          // Advance note cursor dynamically with playback time so high-tempo notes are never lagged
+          while (_currentNoteIndex < _currentSong.notes.length - 1 &&
+              _playbackTimeMs >= _currentSong.notes[_currentNoteIndex].startTimeMs + _currentSong.notes[_currentNoteIndex].durationMs) {
+            _currentNoteIndex++;
           }
 
           if (_playbackTimeMs >= _currentSong.totalDurationMs) {
@@ -464,7 +470,8 @@ class SongPracticeController extends ChangeNotifier {
     }
 
     final now = DateTime.now();
-    if (now.difference(_lastHitTime).inMilliseconds < 120) return;
+    // Fast 40ms debounce prevents double-triggers without eating rapid sixteenth/thirty-second notes
+    if (now.difference(_lastHitTime).inMilliseconds < 40) return;
     _lastHitTime = now;
 
     int bonus = 100;

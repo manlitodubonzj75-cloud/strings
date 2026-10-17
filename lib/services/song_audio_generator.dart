@@ -84,13 +84,14 @@ class _ViolinBodyFilterBank {
   final _ViolinBiquad _woodDamping = _ViolinBiquad();
 
   _ViolinBodyFilterBank(double sampleRate) {
-    // Smooth, well-balanced formant gains preventing narrow resonance spikes and volume jumps
-    _airCavity.setPeaking(sampleRate, 280.0, 2.2, 1.8);
-    _woodCorpus.setPeaking(sampleRate, 470.0, 2.8, 1.8);
-    _upperBout.setPeaking(sampleRate, 580.0, 1.8, 1.6);
-    _nasalNotch.setPeaking(sampleRate, 1500.0, -1.8, 1.4);
-    _bridgeHill.setPeaking(sampleRate, 2800.0, 2.4, 1.6);
-    _woodDamping.setLowpass(sampleRate, 6800.0, 0.7071);
+    // Warm Italian Stradivari/Guarneri acoustic balance:
+    // Boost wooden corpus depth, tame high-mid bridge hill, smooth warm lowpass rolloff
+    _airCavity.setPeaking(sampleRate, 280.0, 3.2, 2.0);
+    _woodCorpus.setPeaking(sampleRate, 470.0, 3.6, 2.0);
+    _upperBout.setPeaking(sampleRate, 580.0, 2.0, 1.6);
+    _nasalNotch.setPeaking(sampleRate, 1500.0, -2.4, 1.4);
+    _bridgeHill.setPeaking(sampleRate, 2600.0, 1.2, 1.2);
+    _woodDamping.setLowpass(sampleRate, 4800.0, 0.7071);
   }
 
   void reset() {
@@ -220,8 +221,10 @@ class SongAudioGenerator {
     final partialPhases = Float64List(maxPartials);
     for (int n = 1; n <= maxPartials; n++) {
       if (addHarmonics) {
-        final oddBonus = (n % 2 == 1) ? 1.08 : 0.92;
-        partialWeights[n - 1] = (1.0 / n) * oddBonus;
+        final oddBonus = (n % 2 == 1) ? 1.06 : 0.94;
+        // Warm 1/(n^1.18) rolloff eliminates shrill synthetic harmonics while preserving rich acoustic body
+        final rollOff = 1.0 / math.pow(n, 1.18);
+        partialWeights[n - 1] = rollOff * oddBonus;
         partialPhases[n - 1] = (n * n * 0.015) % twoPi; // subtle string dispersion
       } else {
         partialWeights[n - 1] = (n == 1) ? 1.0 : 0.0;

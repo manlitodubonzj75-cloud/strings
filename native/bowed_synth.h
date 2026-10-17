@@ -243,7 +243,7 @@ public:
 
         // 3. Waveguide delays with exact filter phase-delay compensation
         const float nut_damping = 0.05f;
-        const float bridge_damping = (current_freq > 500.0f) ? 0.30f : 0.20f;
+        const float bridge_damping = (current_freq > 500.0f) ? 0.38f : 0.28f;
         const float filter_delay = (nut_damping / (1.0f - nut_damping)) + (bridge_damping / (1.0f - bridge_damping));
         const float total_period = (sample_rate_ / current_freq) - filter_delay;
 
@@ -262,14 +262,14 @@ public:
         const float string_velocity = bridge_incoming + neck_incoming;
         const float relative_velocity = bow_velocity - string_velocity;
 
-        const float v0 = 0.22f + 0.10f * (current_freq / 1000.0f);
+        const float v0 = 0.26f + 0.14f * (current_freq / 1000.0f);
         const float norm_v = relative_velocity / v0;
-        const float friction = 1.0f / (1.0f + 1.8f * norm_v * norm_v);
+        const float friction = 1.0f / (1.0f + 2.5f * norm_v * norm_v);
 
-        // Subtle horsehair rosin friction noise (0.3%)
+        // Subtle horsehair rosin friction noise (0.2%)
         noise_seed_ = (noise_seed_ * 196314165u + 907633515u);
         const float white_noise = static_cast<float>(static_cast<int32_t>(noise_seed_)) / 2147483648.0f;
-        const float rosin_noise = 0.003f * white_noise * bow_env;
+        const float rosin_noise = 0.002f * white_noise * bow_env;
 
         const float reflected_velocity = (relative_velocity + rosin_noise) * friction;
 
@@ -300,19 +300,20 @@ public:
         body_sound = body_wood_damping_.process(body_sound);
 
         // Soft-knee limiting (tanh) for warm wooden acoustic saturation
-        const float out = std::tanh(body_sound * 0.20f) * output_env * 0.85f;
+        const float out = std::tanh(body_sound * 0.22f) * output_env * 0.85f;
         return out;
     }
 
 private:
     void initFilters() {
-        hp_dc_filter_.setHighpass(sample_rate_, 90.0f, 0.707f);
-        body_air_filter_.setPeaking(sample_rate_, 280.0f, 8.0f, 3.5f);
-        body_wood_filter_.setPeaking(sample_rate_, 470.0f, 10.5f, 3.8f);
-        body_upper_bout_.setPeaking(sample_rate_, 580.0f, 5.0f, 2.8f);
-        body_nasal_filter_.setPeaking(sample_rate_, 1500.0f, -4.0f, 1.6f);
-        body_bridge_filter_.setPeaking(sample_rate_, 2800.0f, 7.0f, 2.2f);
-        body_wood_damping_.setLowpass(sample_rate_, 5200.0f, 0.7071f);
+        hp_dc_filter_.setHighpass(sample_rate_, 85.0f, 0.707f);
+        // Warm resonant body profile: strong Helmholtz A0 & corpus T1, gentle bridge hill, natural wood rolloff
+        body_air_filter_.setPeaking(sample_rate_, 280.0f, 8.5f, 2.5f);
+        body_wood_filter_.setPeaking(sample_rate_, 470.0f, 10.0f, 2.5f);
+        body_upper_bout_.setPeaking(sample_rate_, 580.0f, 4.5f, 2.0f);
+        body_nasal_filter_.setPeaking(sample_rate_, 1500.0f, -4.5f, 1.4f);
+        body_bridge_filter_.setPeaking(sample_rate_, 2600.0f, 2.2f, 1.3f);
+        body_wood_damping_.setLowpass(sample_rate_, 4100.0f, 0.7071f);
     }
 
     float sample_rate_{44100.0f};
