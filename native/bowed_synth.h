@@ -148,13 +148,19 @@ private:
  * 4. Fast adaptive envelope scaling (short notes 30-100ms are never eaten or muffled)
  * 5. Natural acoustic ring-down tail (45ms release) - eliminates cut-offs and clicks
  * 6. Continuous Stradivarius body resonance without harsh filter resets between notes
- * 7. Soft-knee limiting (tanh) for warm wooden acoustic saturation
+ * 7. Soft-knee limiting (tanh) for warm wooden acoustic saturation with healthy mobile loudness
  */
 class BowedViolinModel {
 public:
     explicit BowedViolinModel(float sample_rate = 44100.0f)
         : sample_rate_(sample_rate)
     {
+        initFilters();
+    }
+
+    void setSampleRate(float sample_rate) {
+        if (sample_rate <= 8000.0f || sample_rate > 192000.0f) return;
+        sample_rate_ = sample_rate;
         initFilters();
     }
 
@@ -299,8 +305,8 @@ public:
         body_sound = body_bridge_filter_.process(body_sound);
         body_sound = body_wood_damping_.process(body_sound);
 
-        // Soft-knee limiting (tanh) for warm wooden acoustic saturation
-        const float out = std::tanh(body_sound * 0.22f) * output_env * 0.85f;
+        // Soft-knee limiting (tanh) for warm wooden acoustic saturation with healthy mobile loudness
+        const float out = std::tanh(body_sound * 0.75f) * output_env * 0.88f;
         return out;
     }
 
@@ -312,8 +318,8 @@ private:
         body_wood_filter_.setPeaking(sample_rate_, 470.0f, 10.0f, 2.5f);
         body_upper_bout_.setPeaking(sample_rate_, 580.0f, 4.5f, 2.0f);
         body_nasal_filter_.setPeaking(sample_rate_, 1500.0f, -4.5f, 1.4f);
-        body_bridge_filter_.setPeaking(sample_rate_, 2600.0f, 2.2f, 1.3f);
-        body_wood_damping_.setLowpass(sample_rate_, 4100.0f, 0.7071f);
+        body_bridge_filter_.setPeaking(sample_rate_, 2600.0f, 3.8f, 1.3f);
+        body_wood_damping_.setLowpass(sample_rate_, 4600.0f, 0.7071f);
     }
 
     float sample_rate_{44100.0f};

@@ -284,6 +284,36 @@ void playAudioPcmBuffer(const float* samples, std::size_t count) noexcept {
 
 #elif defined(__ANDROID__)
 #include <aaudio/AAudio.h>
+#include <dlfcn.h>
+
+namespace {
+
+using pfn_AAudioStreamBuilder_setUsage = void (*)(AAudioStreamBuilder*, int32_t);
+using pfn_AAudioStreamBuilder_setContentType = void (*)(AAudioStreamBuilder*, int32_t);
+using pfn_AAudioStreamBuilder_setInputPreset = void (*)(AAudioStreamBuilder*, int32_t);
+
+inline void safeSetAudioUsage(AAudioStreamBuilder* builder) {
+    static auto fn_usage = reinterpret_cast<pfn_AAudioStreamBuilder_setUsage>(
+        dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setUsage"));
+    static auto fn_content = reinterpret_cast<pfn_AAudioStreamBuilder_setContentType>(
+        dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setContentType"));
+    if (fn_usage) {
+        fn_usage(builder, 1); // AAUDIO_USAGE_MEDIA = 1
+    }
+    if (fn_content) {
+        fn_content(builder, 2); // AAUDIO_CONTENT_TYPE_MUSIC = 2
+    }
+}
+
+inline void safeSetInputPreset(AAudioStreamBuilder* builder) {
+    static auto fn_input = reinterpret_cast<pfn_AAudioStreamBuilder_setInputPreset>(
+        dlsym(RTLD_DEFAULT, "AAudioStreamBuilder_setInputPreset"));
+    if (fn_input) {
+        fn_input(builder, 6); // AAUDIO_INPUT_PRESET_VOICE_RECOGNITION = 6
+    }
+}
+
+} // namespace
 
 struct AndroidAudioCapture {
     AAudioStream* stream{nullptr};
@@ -365,34 +395,44 @@ public:
         synth_.noteOff();
 
         const int next_idx = 1 - active_buf_idx_.load(std::memory_order_relaxed);
-        pcm_buffers_[next_idx].assign(samples, samples + count);
+        // Resample from 44100 Hz to hardware sample rate if needed
+        if (std::abs(sample_rate_ - 44100.0f) > 50.0f && sample_rate_ > 8000.0f) {
+            const double ratio = static_cast<double>(sample_rate_) / 44100.0;
+            const std::size_t resampled_count = static_cast<std::size_t>(count * ratio);
+            pcm_buffers_[next_idx].resize(resampled_count);
+            for (std::size_t i = 0; i < resampled_count; ++i) {
+                const double src_pos = i / ratio;
+                const std::size_t idx0 = static_cast<std::size_t>(src_pos);
+                if (idx0 + 1 < count) {
+                    const float frac = static_cast<float>(src_pos - idx0);
+                    pcm_buffers_[next_idx][i] = samples[idx0] * (1.0f - frac) + samples[idx0 + 1] * frac;
+                } else if (idx0 < count) {
+                    pcm_buffers_[next_idx][i] = samples[idx0];
+                } else {
+                    pcm_buffers_[next_idx][i] = 0.0f;
+                }
+            }
+            pcm_size_.store(resampled_count, std::memory_order_release);
+        } else {
+            pcm_buffers_[next_idx].assign(samples, samples + count);
+            pcm_size_.store(count, std::memory_order_release);
+        }
 
         pcm_ptr_.store(nullptr, std::memory_order_release);
         pcm_pos_.store(0, std::memory_order_release);
-        pcm_size_.store(count, std::memory_order_release);
         active_buf_idx_.store(next_idx, std::memory_order_release);
         pcm_ptr_.store(pcm_buffers_[next_idx].data(), std::memory_order_release);
 
         pending_stop_.store(false, std::memory_order_release);
         is_playing_.store(true, std::memory_order_release);
 
-        if (!stream_) {
-            initStream();
-        } else {
-            aaudio_stream_state_t state = AAudioStream_getState(stream_);
-            if (state == AAUDIO_STREAM_STATE_PAUSED || state == AAUDIO_STREAM_STATE_STOPPED) {
-                AAudioStream_requestStart(stream_);
-            }
-        }
+        ensureStreamActive();
     }
 
     void play(float freq_hz, float duration_sec, bool is_legato = false) {
         if (freq_hz <= 0.0f || duration_sec <= 0.0f) {
             stop();
             return;
-        }
-        if (!stream_) {
-            initStream();
         }
 
         const NoteEvent ev{freq_hz, duration_sec, is_legato};
@@ -403,10 +443,40 @@ public:
         pending_stop_.store(false, std::memory_order_release);
         is_playing_.store(true, std::memory_order_release);
 
+        ensureStreamActive();
+    }
+
+    void onStreamError(aaudio_result_t /*error*/) {
+        stream_needs_restart_.store(true, std::memory_order_release);
+    }
+
+    void ensureStreamActive() {
+        if (stream_needs_restart_.load(std::memory_order_acquire)) {
+            closeStream();
+            stream_needs_restart_.store(false, std::memory_order_release);
+        }
+
+        if (stream_) {
+            aaudio_stream_state_t state = AAudioStream_getState(stream_);
+            if (state == AAUDIO_STREAM_STATE_DISCONNECTED ||
+                state == AAUDIO_STREAM_STATE_CLOSING ||
+                state == AAUDIO_STREAM_STATE_CLOSED) {
+                closeStream();
+            }
+        }
+
+        if (!stream_) {
+            initStream();
+        }
+
         if (stream_) {
             aaudio_stream_state_t state = AAudioStream_getState(stream_);
             if (state == AAUDIO_STREAM_STATE_PAUSED || state == AAUDIO_STREAM_STATE_STOPPED) {
-                AAudioStream_requestStart(stream_);
+                aaudio_result_t res = AAudioStream_requestStart(stream_);
+                if (res != AAUDIO_OK) {
+                    closeStream();
+                    initStream();
+                }
             }
         }
     }
@@ -486,33 +556,55 @@ public:
     bool isFloatFormat() const { return is_float_format_; }
 
 private:
-    void initStream() {
+    bool tryOpenStream(aaudio_performance_mode_t perf_mode, aaudio_format_t format) {
         AAudioStreamBuilder* builder = nullptr;
         aaudio_result_t result = AAudio_createStreamBuilder(&builder);
         if (result != AAUDIO_OK || !builder) {
-            return;
+            return false;
         }
 
         AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
-        AAudioStreamBuilder_setSampleRate(builder, 44100);
+        AAudioStreamBuilder_setSampleRate(builder, 0); // 0 = native hardware rate (48000 or 44100)
         AAudioStreamBuilder_setChannelCount(builder, 1);
-        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+        AAudioStreamBuilder_setFormat(builder, format);
+        AAudioStreamBuilder_setPerformanceMode(builder, perf_mode);
         AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+        safeSetAudioUsage(builder);
         AAudioStreamBuilder_setDataCallback(builder, androidAudioOutputCallback, this);
+        AAudioStreamBuilder_setErrorCallback(builder, androidAudioErrorCallback, this);
 
         result = AAudioStreamBuilder_openStream(builder, &stream_);
-        if (result != AAUDIO_OK || !stream_) {
-            AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-            result = AAudioStreamBuilder_openStream(builder, &stream_);
-        }
         AAudioStreamBuilder_delete(builder);
 
         if (result == AAUDIO_OK && stream_) {
-            aaudio_format_t fmt = AAudioStream_getFormat(stream_);
-            is_float_format_ = (fmt == AAUDIO_FORMAT_PCM_FLOAT);
-            AAudioStream_requestStart(stream_);
+            aaudio_format_t actual_fmt = AAudioStream_getFormat(stream_);
+            is_float_format_ = (actual_fmt == AAUDIO_FORMAT_PCM_FLOAT);
+            const int32_t sr = AAudioStream_getSampleRate(stream_);
+            if (sr > 0) {
+                sample_rate_ = static_cast<float>(sr);
+                synth_.setSampleRate(sample_rate_);
+            }
+            result = AAudioStream_requestStart(stream_);
+            if (result == AAUDIO_OK) {
+                return true;
+            }
+            AAudioStream_close(stream_);
+            stream_ = nullptr;
         }
+        return false;
+    }
+
+    void initStream() {
+        closeStream();
+
+        // 1. Low latency PCM Float
+        if (tryOpenStream(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY, AAUDIO_FORMAT_PCM_FLOAT)) return;
+        // 2. Low latency PCM Int16
+        if (tryOpenStream(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY, AAUDIO_FORMAT_PCM_I16)) return;
+        // 3. Standard latency PCM Float
+        if (tryOpenStream(AAUDIO_PERFORMANCE_MODE_NONE, AAUDIO_FORMAT_PCM_FLOAT)) return;
+        // 4. Standard latency PCM Int16 (universal fallback)
+        if (tryOpenStream(AAUDIO_PERFORMANCE_MODE_NONE, AAUDIO_FORMAT_PCM_I16)) return;
     }
 
     void closeStream() {
@@ -540,10 +632,23 @@ private:
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
 
+    static void androidAudioErrorCallback(
+        AAudioStream* /*stream*/,
+        void* userData,
+        aaudio_result_t error)
+    {
+        auto* player = static_cast<AndroidAudioPlayer*>(userData);
+        if (player) {
+            player->onStreamError(error);
+        }
+    }
+
     AAudioStream* stream_{nullptr};
+    std::atomic<bool> stream_needs_restart_{false};
     SpscRingBuffer<NoteEvent, 128> note_queue_;
     std::atomic<bool> is_playing_{false};
     std::atomic<bool> pending_stop_{false};
+    float sample_rate_{44100.0f};
     BowedViolinModel synth_{44100.0f};
     bool is_float_format_{true};
     std::vector<float> float_buf_;
@@ -757,6 +862,7 @@ bool ViolinTracker::startMic()
     AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
     AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+    safeSetInputPreset(builder);
     AAudioStreamBuilder_setDataCallback(builder, androidAudioInputCallback, capture);
 
     result = AAudioStreamBuilder_openStream(builder, &capture->stream);

@@ -198,7 +198,19 @@ class AudioEngine {
   bool _isTonePlayingDart = false;
   Timer? _tonePlayingTimer;
 
+  AudioEngine() {
+    _ensureMainLibrary();
+  }
+
+  void _ensureMainLibrary() {
+    if (_mainLibrary != null) return;
+    try {
+      _openMainLibrary();
+    } catch (_) {}
+  }
+
   bool get isTonePlaying {
+    _ensureMainLibrary();
     final nativeCheck = _isTonePlayingNative;
     if (nativeCheck != null && nativeCheck() != 0) {
       return true;
@@ -309,6 +321,7 @@ class AudioEngine {
 
   void playPcmBuffer(Float32List samples) {
     if (samples.isEmpty) return;
+    _ensureMainLibrary();
     _isTonePlayingDart = true;
     _tonePlayingTimer?.cancel();
     final durSec = samples.length / 44100.0;
@@ -326,6 +339,7 @@ class AudioEngine {
   }
 
   void playTone(double frequencyHz, [double durationSec = 1.0]) {
+    _ensureMainLibrary();
     _isTonePlayingDart = true;
     _tonePlayingTimer?.cancel();
     _tonePlayingTimer = Timer(Duration(milliseconds: (durationSec * 1000).toInt() + 100), () {
@@ -352,6 +366,7 @@ class AudioEngine {
 
   /// Immediately silences any active acoustic tone or synthesizer output.
   void stopTone() {
+    _ensureMainLibrary();
     _tonePlayingTimer?.cancel();
     _isTonePlayingDart = false;
     final fn = _stopTone;
@@ -399,14 +414,11 @@ class AudioEngine {
     _workerCommandPort = null;
     _nativeHandle = null;
 
-    _mainLibrary = null;
     _startMic = null;
     _stopMic = null;
     _isMicActive = null;
     _pushSamples = null;
     _pushSynthNote = null;
-    _playTone = null;
-    _stopTone = null;
 
     _resultReceivePort?.close();
     _resultReceivePort = null;
