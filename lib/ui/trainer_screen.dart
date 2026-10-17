@@ -1,8 +1,7 @@
-import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../audio_engine.dart';
+import '../controllers/trainer_controller.dart';
 import '../music_theory.dart';
 import '../theme/apple_violin_theme.dart';
 import 'widgets/circle_of_fifths_picker.dart';
@@ -11,12 +10,14 @@ class TrainerScreen extends StatefulWidget {
   final AudioEngine audioEngine;
   final DetectedNoteInfo? currentNote;
   final ValueNotifier<DetectedNoteInfo?>? noteNotifier;
+  final TrainerController? controller;
 
   const TrainerScreen({
     super.key,
     required this.audioEngine,
     this.currentNote,
     this.noteNotifier,
+    this.controller,
   });
 
   @override
@@ -25,9 +26,6 @@ class TrainerScreen extends StatefulWidget {
 
 class _TrainerScreenState extends State<TrainerScreen>
     with SingleTickerProviderStateMixin {
-  /// All 24 algorithmic violin scales generated from solfège rules
-  static final List<ViolinScaleDef> _scales = ScaleGenerator.all24Scales;
-
   /// Train-mode pill row — ♩ Фикс · Ускорение · Лигатура · Дробление · Пропуск · Случайно
   static const List<(String, String)> _trainModes = [
     ('fixed', '♩ Фикс'),
@@ -38,186 +36,48 @@ class _TrainerScreenState extends State<TrainerScreen>
     ('random', '🌀 Случайно'),
   ];
 
-  TonalityDef _selectedTonality = const TonalityDef(
-    position: CirclePosition.pos2, // D Major (Ре мажор) - standard beginner scale
-    mode: TonalityMode.major,
-  );
-  late ViolinScaleDef _currentScale;
-  bool _showCircleOfFifths = false;
-  int _selectedScaleIndex = 2; // Index of D Major
-  int _currentStepIndex = 0;
-  int _streak = 7;
-  double _holdProgress = 0.0;
-  Timer? _ticker;
-  String _trainMode = 'fixed';
+  late final TrainerController _controller;
+  bool _ownsController = false;
   late final AnimationController _pulse;
 
-  bool _isReferencePlaying = false;
-  Timer? _referenceTimer;
-  bool _isFullScalePlaying = false;
-  Timer? _fullScaleTimer;
-
-  ViolinScaleDef get currentScale => _currentScale;
-  ScaleNoteStep get currentStep => currentScale.steps[_currentStepIndex];
+  ViolinScaleDef get currentScale => _controller.currentScale;
+  ScaleNoteStep get currentStep => _controller.currentStep;
 
   @override
   void initState() {
     super.initState();
-    _currentScale = ScaleGenerator.generateScale(_selectedTonality);
-    _selectedScaleIndex = _scales.indexWhere((s) => s.tonality == _selectedTonality);
-    if (_selectedScaleIndex < 0) _selectedScaleIndex = 0;
+    if (widget.controller != null) {
+      _controller = widget.controller!;
+    } else {
+      _controller = TrainerController(
+        audioEngine: widget.audioEngine,
+        initialStreak: 7,
+      );
+      _ownsController = true;
+    }
+    _controller.addListener(_onControllerChanged);
+    _controller.startProgressTracking(widget.noteNotifier, () => widget.currentNote);
 
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..repeat(reverse: true);
-    _ticker = Timer.periodic(const Duration(milliseconds: 50), _onTick);
+  }
+
+  void _onControllerChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
   void dispose() {
     _pulse.dispose();
-    _ticker?.cancel();
-    _referenceTimer?.cancel();
-    _fullScaleTimer?.cancel();
+    _controller.removeListener(_onControllerChanged);
+    if (_ownsController) {
+      _controller.dispose();
+    }
     super.dispose();
-  }
-
-  void _onTick(Timer _) {
-    if (_isReferencePlaying || _isFullScalePlaying) {
-      return;
-    }
-    final note = widget.noteNotifier?.value ?? widget.currentNote;
-    if (note == null) {
-      if (_holdProgress > 0) {
-        setState(() {
-          _holdProgress = math.max(0.0, _holdProgress - 0.04);
-        });
-      }
-      return;
-    }
-
-    final isCorrectNote = note.midiNote == currentStep.midiNote;
-    final isCleanBowing = !note.isScratching && note.isInTune;
-
-    if (isCorrectNote && isCleanBowing) {
-      setState(() {
-        _holdProgress = math.min(1.0, _holdProgress + 0.08);
-        if (_holdProgress >= 1.0) {
-          _holdProgress = 0.0;
-          _streak++;
-          _nextStep();
-        }
-      });
-    } else {
-      if (_holdProgress > 0) {
-        setState(() {
-          _holdProgress = math.max(0.0, _holdProgress - 0.03);
-        });
-      }
-    }
-  }
-
-  void _nextStep() {
-    _stopFullScale();
-    _referenceTimer?.cancel();
-    _isReferencePlaying = false;
-    setState(() {
-      _currentStepIndex = (_currentStepIndex + 1) % currentScale.steps.length;
-    });
-  }
-
-  void _playSingleReference() {
-    _stopFullScale();
-    _referenceTimer?.cancel();
-    setState(() {
-      _isReferencePlaying = true;
-      _holdProgress = 0.0;
-    });
-    widget.audioEngine.playTone(currentStep.targetHz, 1.2);
-    _referenceTimer = Timer(const Duration(milliseconds: 1350), () {
-      if (mounted) {
-        setState(() {
-          _isReferencePlaying = false;
-        });
-      }
-    });
-  }
-
-  void _playFullScale() {
-    if (_isFullScalePlaying) {
-      _stopFullScale();
-      return;
-    }
-
-    _referenceTimer?.cancel();
-    setState(() {
-      _isReferencePlaying = false;
-      _isFullScalePlaying = true;
-      _currentStepIndex = 0;
-      _holdProgress = 0.0;
-    });
-
-    int step = 0;
-    const noteDurationMs = 650;
-
-    void playStep() {
-      if (!mounted || !_isFullScalePlaying) return;
-      if (step >= currentScale.steps.length) {
-        _stopFullScale();
-        return;
-      }
-      setState(() {
-        _currentStepIndex = step;
-      });
-      final note = currentScale.steps[step];
-      widget.audioEngine.playTone(note.targetHz, 0.60);
-
-      step++;
-      _fullScaleTimer = Timer(const Duration(milliseconds: noteDurationMs), playStep);
-    }
-
-    playStep();
-  }
-
-  void _stopFullScale() {
-    _fullScaleTimer?.cancel();
-    if (mounted && _isFullScalePlaying) {
-      setState(() {
-        _isFullScalePlaying = false;
-      });
-    }
-  }
-
-  void _selectTonality(TonalityDef tonality) {
-    _stopFullScale();
-    _referenceTimer?.cancel();
-    _isReferencePlaying = false;
-    setState(() {
-      _selectedTonality = tonality;
-      _currentScale = ScaleGenerator.generateScale(tonality);
-      _selectedScaleIndex = _scales.indexWhere((s) => s.tonality == tonality);
-      if (_selectedScaleIndex < 0) _selectedScaleIndex = 0;
-      _currentStepIndex = 0;
-      _holdProgress = 0.0;
-    });
-  }
-
-  void _selectScale(int index) {
-    _stopFullScale();
-    _referenceTimer?.cancel();
-    _isReferencePlaying = false;
-    final scale = _scales[index];
-    if (scale.tonality != null) {
-      _selectTonality(scale.tonality!);
-    } else {
-      setState(() {
-        _selectedScaleIndex = index;
-        _currentScale = scale;
-        _currentStepIndex = 0;
-        _holdProgress = 0.0;
-      });
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -264,7 +124,7 @@ class _TrainerScreenState extends State<TrainerScreen>
 
   /// Russian feedback line + its accent colour (derived, not stateful).
   (String, Color) _hint(DetectedNoteInfo? note, bool isInTune) {
-    if (_isReferencePlaying || _isFullScalePlaying) {
+    if (_controller.isReferencePlaying || _controller.isFullScalePlaying) {
       return (
         '🔊 Звучит эталон (${currentStep.targetHz.toStringAsFixed(1)} Гц) · Послушайте интонацию',
         AppleViolinTheme.highVoltageLime,
@@ -396,7 +256,7 @@ class _TrainerScreenState extends State<TrainerScreen>
           ),
           const SizedBox(width: 8),
           Text(
-            'СЕРИЯ · $_streak НОТ',
+            'СЕРИЯ · ${_controller.streak} НОТ',
             style: AppleViolinTheme.telemetry.copyWith(
               fontSize: 10,
               letterSpacing: 1.1,
@@ -413,6 +273,8 @@ class _TrainerScreenState extends State<TrainerScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildScaleSelectorCard() {
+    final scales = TrainerController.allScales;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
       decoration: AppleViolinTheme.glassDecoration(radius: AppleViolinTheme.bentoRadius),
@@ -426,17 +288,17 @@ class _TrainerScreenState extends State<TrainerScreen>
               GestureDetector(
                 onTap: () {
                   HapticFeedback.selectionClick();
-                  setState(() => _showCircleOfFifths = !_showCircleOfFifths);
+                  _controller.toggleCircleOfFifths();
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: _showCircleOfFifths
+                    color: _controller.showCircleOfFifths
                         ? AppleViolinTheme.highVoltageLime.withValues(alpha: 0.15)
                         : const Color(0x0EFFFFFF),
                     borderRadius: AppleViolinTheme.pillRadius,
                     border: Border.all(
-                      color: _showCircleOfFifths
+                      color: _controller.showCircleOfFifths
                           ? AppleViolinTheme.highVoltageLime
                           : AppleViolinTheme.borderSubtle,
                     ),
@@ -445,21 +307,21 @@ class _TrainerScreenState extends State<TrainerScreen>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        _showCircleOfFifths
+                        _controller.showCircleOfFifths
                             ? Icons.view_list_rounded
                             : Icons.pie_chart_outline_rounded,
                         size: 13,
-                        color: _showCircleOfFifths
+                        color: _controller.showCircleOfFifths
                             ? AppleViolinTheme.highVoltageLime
                             : AppleViolinTheme.headline,
                       ),
                       const SizedBox(width: 5),
                       Text(
-                        _showCircleOfFifths ? 'Список' : 'Квинтовый круг',
+                        _controller.showCircleOfFifths ? 'Список' : 'Квинтовый круг',
                         style: AppleViolinTheme.telemetry.copyWith(
                           fontSize: 10,
                           fontWeight: FontWeight.w700,
-                          color: _showCircleOfFifths
+                          color: _controller.showCircleOfFifths
                               ? AppleViolinTheme.highVoltageLime
                               : AppleViolinTheme.headline,
                         ),
@@ -481,12 +343,14 @@ class _TrainerScreenState extends State<TrainerScreen>
               ),
             ],
           ),
-          if (_showCircleOfFifths) ...[
+          if (_controller.showCircleOfFifths) ...[
             const SizedBox(height: 16),
             CircleOfFifthsPicker(
               size: 270,
-              selectedTonality: _selectedTonality,
-              onTonalityChanged: _selectTonality,
+              selectedTonality: _controller.selectedTonality,
+              onTonalityChanged: (tonality) {
+                _controller.selectTonality(tonality);
+              },
             ),
             const SizedBox(height: 10),
             Center(
@@ -506,14 +370,14 @@ class _TrainerScreenState extends State<TrainerScreen>
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 physics: const BouncingScrollPhysics(),
-                itemCount: _scales.length,
+                itemCount: scales.length,
                 separatorBuilder: (context, index) => const SizedBox(width: 8),
                 itemBuilder: (context, index) {
-                  final scale = _scales[index];
-                  final isSelected = scale.tonality == _selectedTonality ||
-                      (scale.tonality == null && index == _selectedScaleIndex);
+                  final scale = scales[index];
+                  final isSelected = scale.tonality == _controller.selectedTonality ||
+                      (scale.tonality == null && index == _controller.selectedScaleIndex);
                   return GestureDetector(
-                    onTap: () => _selectScale(index),
+                    onTap: () => _controller.selectScale(index),
                     child: AnimatedContainer(
                       duration: AppleViolinTheme.motionFast,
                       curve: AppleViolinTheme.easeOutExpo,
@@ -559,11 +423,10 @@ class _TrainerScreenState extends State<TrainerScreen>
   // ---------------------------------------------------------------------------
 
   Widget _buildHeroCard(bool isInTune, DetectedNoteInfo? note) {
-    final bowDown = _currentStepIndex.isEven;
+    final bowDown = _controller.currentStepIndex.isEven;
 
     return Stack(
       children: [
-        // Faint radial lime glow behind the hero card.
         Positioned(
           top: -90,
           left: -70,
@@ -704,7 +567,7 @@ class _TrainerScreenState extends State<TrainerScreen>
     final isFlat = currentScale.tonality?.accidentalCount != null &&
         currentScale.tonality!.accidentalCount < 0;
 
-    final isRefActive = _isReferencePlaying || _isFullScalePlaying;
+    final isRefActive = _controller.isReferencePlaying || _controller.isFullScalePlaying;
     return Container(
       height: 112,
       padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -800,8 +663,8 @@ class _TrainerScreenState extends State<TrainerScreen>
         separatorBuilder: (context, index) => const SizedBox(width: 6),
         itemBuilder: (context, index) {
           final step = currentScale.steps[index];
-          final isCurrent = index == _currentStepIndex;
-          final isDone = index < _currentStepIndex;
+          final isCurrent = index == _controller.currentStepIndex;
+          final isDone = index < _controller.currentStepIndex;
 
           final bg = isCurrent
               ? AppleViolinTheme.highVoltageLime
@@ -823,10 +686,7 @@ class _TrainerScreenState extends State<TrainerScreen>
 
           return GestureDetector(
             onTap: () {
-              setState(() {
-                _currentStepIndex = index;
-                _holdProgress = 0.0;
-              });
+              _controller.setStepIndex(index);
             },
             child: AnimatedContainer(
               duration: AppleViolinTheme.motionFast,
@@ -870,7 +730,7 @@ class _TrainerScreenState extends State<TrainerScreen>
   }
 
   Widget _buildPurityRow(DetectedNoteInfo? note, bool isInTune, bool bowDown) {
-    final pct = (_holdProgress * 100).round();
+    final pct = (_controller.holdProgress * 100).round();
     final (hintText, hintColor) = _hint(note, isInTune);
 
     return Column(
@@ -884,7 +744,7 @@ class _TrainerScreenState extends State<TrainerScreen>
               child: ClipRRect(
                 borderRadius: AppleViolinTheme.pillRadius,
                 child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.0, end: _holdProgress),
+                  tween: Tween(begin: 0.0, end: _controller.holdProgress),
                   duration: AppleViolinTheme.motion,
                   curve: AppleViolinTheme.easeOutExpo,
                   builder: (context, value, _) => LinearProgressIndicator(
@@ -947,9 +807,9 @@ class _TrainerScreenState extends State<TrainerScreen>
             separatorBuilder: (context, index) => const SizedBox(width: 8),
             itemBuilder: (context, index) {
               final (id, label) = _trainModes[index];
-              final isActive = id == _trainMode;
+              final isActive = id == _controller.trainMode;
               return GestureDetector(
-                onTap: () => setState(() => _trainMode = id),
+                onTap: () => _controller.setTrainMode(id),
                 child: AnimatedContainer(
                   duration: AppleViolinTheme.motionFast,
                   curve: AppleViolinTheme.easeOutExpo,
@@ -989,42 +849,45 @@ class _TrainerScreenState extends State<TrainerScreen>
   }
 
   Widget _buildActions() {
+    final isReferencePlaying = _controller.isReferencePlaying;
+    final isFullScalePlaying = _controller.isFullScalePlaying;
+
     return Row(
       children: [
         Expanded(
           flex: 5,
           child: GestureDetector(
-            onTap: _playSingleReference,
+            onTap: _controller.playSingleReference,
             child: AnimatedContainer(
               duration: AppleViolinTheme.motionFast,
               padding: const EdgeInsets.symmetric(vertical: 14),
               decoration: BoxDecoration(
-                color: _isReferencePlaying
+                color: isReferencePlaying
                     ? AppleViolinTheme.highVoltageLime.withValues(alpha: 0.18)
                     : const Color(0x0CFFFFFF),
                 borderRadius: AppleViolinTheme.pillRadius,
                 border: Border.all(
-                  color: _isReferencePlaying
+                  color: isReferencePlaying
                       ? AppleViolinTheme.highVoltageLime
                       : AppleViolinTheme.borderSubtle,
                 ),
-                boxShadow: _isReferencePlaying ? const [AppleViolinTheme.limeGlow] : null,
+                boxShadow: isReferencePlaying ? const [AppleViolinTheme.limeGlow] : null,
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
-                    _isReferencePlaying ? Icons.graphic_eq_rounded : Icons.volume_up_rounded,
+                    isReferencePlaying ? Icons.graphic_eq_rounded : Icons.volume_up_rounded,
                     size: 16,
                     color: AppleViolinTheme.highVoltageLime,
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    _isReferencePlaying ? 'ЗВУЧИТ...' : 'ЭТАЛОН',
+                    isReferencePlaying ? 'ЗВУЧИТ...' : 'ЭТАЛОН',
                     style: AppleViolinTheme.telemetry.copyWith(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
-                      color: _isReferencePlaying
+                      color: isReferencePlaying
                           ? AppleViolinTheme.highVoltageLime
                           : const Color(0xFFE4E4E7),
                     ),
@@ -1038,27 +901,26 @@ class _TrainerScreenState extends State<TrainerScreen>
         Expanded(
           flex: 6,
           child: GestureDetector(
-            onTap: _playFullScale,
+            onTap: _controller.playFullScale,
             child: AnimatedContainer(
               duration: AppleViolinTheme.motionFast,
               padding: const EdgeInsets.symmetric(vertical: 14),
               decoration: BoxDecoration(
-                color: _isFullScalePlaying
+                color: isFullScalePlaying
                     ? const Color(0xFF38BDF8).withValues(alpha: 0.18)
                     : const Color(0x0CFFFFFF),
                 borderRadius: AppleViolinTheme.pillRadius,
                 border: Border.all(
-                  color: _isFullScalePlaying
+                  color: isFullScalePlaying
                       ? const Color(0xFF38BDF8)
                       : AppleViolinTheme.borderSubtle,
                 ),
-                boxShadow: _isFullScalePlaying
+                boxShadow: isFullScalePlaying
                     ? [
                         BoxShadow(
                           color: const Color(0xFF38BDF8).withValues(alpha: 0.35),
-                          blurRadius: 10,
-                          spreadRadius: 1,
-                        )
+                          blurRadius: 18,
+                        ),
                       ]
                     : null,
               ),
@@ -1066,53 +928,21 @@ class _TrainerScreenState extends State<TrainerScreen>
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
-                    _isFullScalePlaying ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                    size: 17,
-                    color: _isFullScalePlaying
+                    isFullScalePlaying ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                    size: 18,
+                    color: isFullScalePlaying
                         ? const Color(0xFF38BDF8)
-                        : const Color(0xFFE4E4E7),
+                        : AppleViolinTheme.headline,
                   ),
-                  const SizedBox(width: 5),
+                  const SizedBox(width: 6),
                   Text(
-                    _isFullScalePlaying ? 'СТОП' : 'ВСЯ ГАММА',
+                    isFullScalePlaying ? 'СТОП' : 'ВСЯ ГАММА',
                     style: AppleViolinTheme.telemetry.copyWith(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
-                      color: _isFullScalePlaying
+                      color: isFullScalePlaying
                           ? const Color(0xFF38BDF8)
-                          : const Color(0xFFE4E4E7),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 5,
-          child: GestureDetector(
-            onTap: _nextStep,
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              decoration: AppleViolinTheme.primaryCtaDecoration(
-                radius: AppleViolinTheme.pillRadius,
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.arrow_forward_rounded,
-                    size: 16,
-                    color: AppleViolinTheme.voidBg,
-                  ),
-                  const SizedBox(width: 5),
-                  Text(
-                    'ДАЛЕЕ',
-                    style: AppleViolinTheme.telemetry.copyWith(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                      color: AppleViolinTheme.voidBg,
+                          : AppleViolinTheme.headline,
                     ),
                   ),
                 ],
@@ -1126,7 +956,7 @@ class _TrainerScreenState extends State<TrainerScreen>
 }
 
 // -----------------------------------------------------------------------------
-// Interactive scale staff renderer
+// Treble clef staff painter for current scale step
 // -----------------------------------------------------------------------------
 
 class _ScaleStaffPainter extends CustomPainter {
@@ -1144,296 +974,159 @@ class _ScaleStaffPainter extends CustomPainter {
     required this.isScratching,
     required this.isInTune,
     required this.accidentalCount,
-    this.isFlat = false,
+    required this.isFlat,
     required this.targetLabel,
   });
 
-  static const List<(int diatonicBase, bool isSharp)> _semis = [
-    (0, false), // C
-    (0, true),  // C#
-    (1, false), // D
-    (1, true),  // D#
-    (2, false), // E
-    (3, false), // F
-    (3, true),  // F#
-    (4, false), // G
-    (4, true),  // G#
-    (5, false), // A
-    (5, true),  // A#
-    (6, false), // B
-  ];
-
-  static (int step, bool isSharp) _diatonic(int midi) {
-    final noteInOct = midi % 12;
-    final octave = (midi ~/ 12) - 1;
-    final (base, sharp) = _semis[noteInOct];
-    return ((octave - 4) * 7 + base, sharp);
-  }
-
   @override
   void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-    const spacing = 8.0;
-    final line1Y = h * 0.55; // bottom staff line
-    final line3Y = line1Y - 2 * spacing;
-
     final staffPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.30)
-      ..strokeWidth = 1.0;
-    final startX = w * 0.05;
-    final endX = w - 8;
+      ..color = const Color(0x3DFFFFFF)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final double staffTop = size.height * 0.32;
+    final double lineSpacing = 11.0;
 
     for (int i = 0; i < 5; i++) {
-      final y = line1Y - i * spacing;
-      canvas.drawLine(Offset(startX, y), Offset(endX, y), staffPaint);
+      final y = staffTop + i * lineSpacing;
+      canvas.drawLine(Offset(10, y), Offset(size.width - 10, y), staffPaint);
     }
 
-    _drawClef(canvas, line3Y, spacing, w * 0.08);
+    _drawClef(canvas, Offset(24, staffTop + lineSpacing * 2.3));
 
     if (accidentalCount > 0) {
-      _drawKeySignature(
-        canvas: canvas,
-        startX: w * 0.14,
-        line1Y: line1Y,
-        spacing: spacing,
-        count: accidentalCount,
-        isFlat: isFlat,
-      );
-    }
-
-    // Target note — high-voltage lime.
-    final (tStep, tSharp) = _diatonic(targetMidi);
-    final targetY = line1Y - (tStep - 2) * (spacing / 2);
-    final targetX = accidentalCount > 2 ? w * 0.50 : w * 0.44;
-    _drawNote(
-      canvas,
-      x: targetX,
-      y: targetY,
-      isSharp: tSharp,
-      step: tStep,
-      spacing: spacing,
-      line1Y: line1Y,
-      color: AppleViolinTheme.highVoltageLime,
-      alpha: 0.9,
-      label: targetLabel,
-    );
-
-    // Detected / previous note — solar amber, emerald when locked in tune.
-    final played = playedMidi;
-    if (played != null) {
-      final (pStep, pSharp) = _diatonic(played);
-      final playedY = line1Y - (pStep - 2) * (spacing / 2);
-      final isMatch = played == targetMidi;
-      Color color;
-      if (isScratching) {
-        color = AppleViolinTheme.crimsonScratch;
-      } else if (isMatch && isInTune) {
-        color = AppleViolinTheme.hyperEmerald;
-      } else if (isMatch) {
-        color = AppleViolinTheme.highVoltageLime;
-      } else {
-        color = AppleViolinTheme.solarAmber;
-      }
-      _drawNote(
-        canvas,
-        x: w * 0.76,
-        y: playedY,
-        isSharp: pSharp,
-        step: pStep,
-        spacing: spacing,
-        line1Y: line1Y,
-        color: color,
-        alpha: 0.85,
-        label: 'ВЫ',
-      );
-    }
-  }
-
-  void _drawClef(Canvas canvas, double line3Y, double spacing, double cx) {
-    final clefPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.70)
-      ..strokeWidth = 1.8
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-
-    final path = Path()
-      ..moveTo(cx, line3Y + spacing * 2.8)
-      ..lineTo(cx, line3Y - spacing * 3.0)
-      ..quadraticBezierTo(cx + spacing * 1.6, line3Y - spacing * 1.8, cx, line3Y - spacing * 0.6)
-      ..quadraticBezierTo(cx - spacing * 2.0, line3Y + spacing * 0.8, cx, line3Y + spacing * 1.8)
-      ..quadraticBezierTo(cx + spacing * 1.8, line3Y + spacing * 1.6, cx, line3Y + spacing * 0.6);
-
-    canvas.drawPath(path, clefPaint);
-
-    final dotPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.70)
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(Offset(cx - 3, line3Y + spacing * 3.0), 3.0, dotPaint);
-  }
-
-  void _drawKeySignature({
-    required Canvas canvas,
-    required double startX,
-    required double line1Y,
-    required double spacing,
-    required int count,
-    required bool isFlat,
-  }) {
-    // Standard solfège positions in treble clef:
-    // line1Y is bottom line (E4).
-    // line 1 (E4): line1Y
-    // line 2 (G4): line1Y - 1.0 * spacing
-    // line 3 (B4): line1Y - 2.0 * spacing
-    // line 4 (D5): line1Y - 3.0 * spacing
-    // line 5 (F5): line1Y - 4.0 * spacing
-    //
-    // Sharps sequence: F#5 (line 5), C#5 (space 3), G#5 (above line 5), D#5 (line 4), A#4 (space 2), E#5 (space 4), B#4 (line 3)
-    const sharpOffsets = [4.0, 2.5, 4.5, 3.0, 1.5, 3.5, 2.0];
-
-    // Flats sequence: Bb4 (line 3), Eb5 (space 4), Ab4 (space 2), Db5 (line 4), Gb4 (line 2), Cb5 (space 3), Fb4 (space 1)
-    const flatOffsets = [2.0, 3.5, 1.5, 3.0, 1.0, 2.5, 0.5];
-
-    final offsets = isFlat ? flatOffsets : sharpOffsets;
-    final stepX = math.min(10.0, spacing * 1.15);
-    final clampedCount = count.clamp(0, 7);
-
-    for (int i = 0; i < clampedCount; i++) {
-      final x = startX + i * stepX;
-      final y = line1Y - offsets[i] * spacing;
-
-      if (isFlat) {
-        _drawFlatGlyph(canvas, x, y, spacing, AppleViolinTheme.highVoltageLime);
-      } else {
-        _drawSharpGlyph(canvas, x, y, spacing, AppleViolinTheme.highVoltageLime);
+      final keyPaint = Paint()
+        ..color = const Color(0xB3FFFFFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.3;
+      final keyX = 42.0;
+      for (int i = 0; i < accidentalCount && i < 7; i++) {
+        final x = keyX + i * 8.0;
+        final y = staffTop + (i.isEven ? 0 : 2) * lineSpacing;
+        _drawAccidental(canvas, Offset(x, y), isFlat: isFlat, paint: keyPaint);
       }
     }
-  }
 
-  void _drawSharpGlyph(Canvas canvas, double cx, double cy, double spacing, Color color) {
-    final vPaint = Paint()
-      ..color = color
-      ..strokeWidth = 1.3
-      ..style = PaintingStyle.stroke;
-    final sh = spacing * 1.5;
-    // Two vertical bars
-    canvas.drawLine(Offset(cx - 2.2, cy - sh * 0.45), Offset(cx - 2.2, cy + sh * 0.45), vPaint);
-    canvas.drawLine(Offset(cx + 2.2, cy - sh * 0.45), Offset(cx + 2.2, cy + sh * 0.45), vPaint);
+    final double noteX = size.width * 0.58;
+    final double targetY = _midiToY(targetMidi, staffTop, lineSpacing);
 
-    // Two tilted horizontal bars
-    final hPaint = Paint()
-      ..color = color
-      ..strokeWidth = 1.6
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(Offset(cx - 4.5, cy - 1.5), Offset(cx + 4.5, cy - 3.5), hPaint);
-    canvas.drawLine(Offset(cx - 4.5, cy + 2.5), Offset(cx + 4.5, cy + 0.5), hPaint);
-  }
+    _drawLedgerLinesIfNeeded(canvas, noteX, targetY, staffTop, lineSpacing);
 
-  void _drawFlatGlyph(Canvas canvas, double cx, double cy, double spacing, Color color) {
-    final stemPaint = Paint()
-      ..color = color
-      ..strokeWidth = 1.3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    // Vertical stem on the left
-    canvas.drawLine(Offset(cx - 2.2, cy - spacing * 1.2), Offset(cx - 2.2, cy + spacing * 0.35), stemPaint);
-
-    // Round curved belly on the right
-    final belly = Path()
-      ..moveTo(cx - 2.2, cy - spacing * 0.35)
-      ..cubicTo(
-        cx + 3.2, cy - spacing * 0.5,
-        cx + 3.6, cy + spacing * 0.25,
-        cx - 2.2, cy + spacing * 0.35,
-      );
-
-    final fillPaint = Paint()
-      ..color = color.withValues(alpha: 0.9)
+    final targetPaint = Paint()
+      ..color = isInTune
+          ? AppleViolinTheme.highVoltageLime
+          : AppleViolinTheme.headline
       ..style = PaintingStyle.fill;
-    canvas.drawPath(belly, fillPaint);
-    canvas.drawPath(belly, stemPaint);
+
+    _drawNoteHead(canvas, Offset(noteX, targetY), targetPaint, isHollow: false);
+    _drawStem(canvas, Offset(noteX, targetY), targetPaint, lineSpacing, goUp: targetY > staffTop + lineSpacing * 2);
+
+    if (playedMidi != null && playedMidi != targetMidi) {
+      final double playedY = _midiToY(playedMidi!, staffTop, lineSpacing);
+      final playedPaint = Paint()
+        ..color = isScratching
+            ? AppleViolinTheme.crimsonScratch
+            : AppleViolinTheme.solarAmber
+        ..style = PaintingStyle.fill;
+
+      final playedX = noteX + 26;
+      _drawLedgerLinesIfNeeded(canvas, playedX, playedY, staffTop, lineSpacing);
+      _drawNoteHead(canvas, Offset(playedX, playedY), playedPaint, isHollow: true);
+    }
   }
 
-  void _drawNote(
-    Canvas canvas, {
-    required double x,
-    required double y,
-    required bool isSharp,
-    required int step,
-    required double spacing,
-    required double line1Y,
-    required Color color,
-    required double alpha,
-    required String label,
-  }) {
-    // Ledger lines
+  double _midiToY(int midi, double staffTop, double spacing) {
+    const int e4Midi = 64;
+    final int semitonesFromE4 = midi - e4Midi;
+    final double diatonicStep = semitonesFromE4 * 0.5;
+    final double bottomLineY = staffTop + spacing * 4;
+    return bottomLineY - diatonicStep * spacing;
+  }
+
+  void _drawLedgerLinesIfNeeded(Canvas canvas, double x, double y, double staffTop, double spacing) {
+    final bottomLineY = staffTop + spacing * 4;
     final ledgerPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.40)
+      ..color = const Color(0x66FFFFFF)
       ..strokeWidth = 1.0;
-    final ledgerWidth = spacing * 2.3;
-    if (step <= 0) {
-      for (int s = 0; s >= step; s -= 2) {
-        final ly = line1Y - (s - 2) * (spacing / 2);
-        canvas.drawLine(Offset(x - ledgerWidth / 2, ly), Offset(x + ledgerWidth / 2, ly), ledgerPaint);
+
+    if (y > bottomLineY + spacing * 0.5) {
+      double cur = bottomLineY + spacing;
+      while (cur <= y + spacing * 0.4) {
+        canvas.drawLine(Offset(x - 12, cur), Offset(x + 12, cur), ledgerPaint);
+        cur += spacing;
       }
-    } else if (step >= 12) {
-      for (int s = 12; s <= step; s += 2) {
-        final ly = line1Y - (s - 2) * (spacing / 2);
-        canvas.drawLine(Offset(x - ledgerWidth / 2, ly), Offset(x + ledgerWidth / 2, ly), ledgerPaint);
+    } else if (y < staffTop - spacing * 0.5) {
+      double cur = staffTop - spacing;
+      while (cur >= y - spacing * 0.4) {
+        canvas.drawLine(Offset(x - 12, cur), Offset(x + 12, cur), ledgerPaint);
+        cur -= spacing;
       }
     }
+  }
 
-    // Sharp sign
-    if (isSharp) {
-      final sharpPaint = Paint()
-        ..color = color.withValues(alpha: alpha)
-        ..strokeWidth = 1.4
-        ..style = PaintingStyle.stroke;
-      final sx = x - spacing * 1.5;
-      final sh = spacing * 1.4;
-      canvas.drawLine(Offset(sx - 2.5, y - sh / 2), Offset(sx - 2.5, y + sh / 2), sharpPaint);
-      canvas.drawLine(Offset(sx + 2.5, y - sh / 2), Offset(sx + 2.5, y + sh / 2), sharpPaint);
-      canvas.drawLine(Offset(sx - 5, y - 1.5), Offset(sx + 5, y - 4), sharpPaint);
-      canvas.drawLine(Offset(sx - 5, y + 3), Offset(sx + 5, y + 0.5), sharpPaint);
-    }
-
-    // Note head (tilted ellipse)
+  void _drawNoteHead(Canvas canvas, Offset center, Paint paint, {required bool isHollow}) {
     canvas.save();
-    canvas.translate(x, y);
-    canvas.rotate(-20 * math.pi / 180);
-    final headFill = Paint()
-      ..color = color.withValues(alpha: alpha)
-      ..style = PaintingStyle.fill;
-    canvas.drawOval(
-      Rect.fromCenter(center: Offset.zero, width: spacing * 1.5, height: spacing * 1.05),
-      headFill,
-    );
-    final headStroke = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2;
-    canvas.drawOval(
-      Rect.fromCenter(center: Offset.zero, width: spacing * 1.5, height: spacing * 1.05),
-      headStroke,
-    );
-    canvas.restore();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(-0.35);
 
-    // Label below the note head (always below, never clipped at the top)
+    final rect = Rect.fromCenter(center: Offset.zero, width: 11.5, height: 8.0);
+    if (isHollow) {
+      final strokePaint = Paint()
+        ..color = paint.color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0;
+      canvas.drawOval(rect, strokePaint);
+    } else {
+      canvas.drawOval(rect, paint);
+    }
+    canvas.restore();
+  }
+
+  void _drawStem(Canvas canvas, Offset noteCenter, Paint paint, double spacing, {required bool goUp}) {
+    final stemPaint = Paint()
+      ..color = paint.color
+      ..strokeWidth = 1.3
+      ..style = PaintingStyle.stroke;
+
+    final stemX = goUp ? noteCenter.dx + 5.0 : noteCenter.dx - 5.0;
+    final stemHeight = spacing * 3.2;
+    final endY = goUp ? noteCenter.dy - stemHeight : noteCenter.dy + stemHeight;
+
+    canvas.drawLine(Offset(stemX, noteCenter.dy), Offset(stemX, endY), stemPaint);
+  }
+
+  void _drawClef(Canvas canvas, Offset pos) {
     final tp = TextPainter(
-      text: TextSpan(
-        text: label,
+      text: const TextSpan(
+        text: '𝄞',
         style: TextStyle(
-          fontFamily: AppleViolinTheme.fontMono,
-          fontSize: 8,
+          fontFamily: 'serif',
+          fontSize: 36,
+          color: Color(0xCCFFFFFF),
           height: 1.0,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.3,
-          color: color,
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    tp.paint(canvas, Offset(x - tp.width / 2, y + spacing * 1.9));
+    tp.paint(canvas, Offset(pos.dx - 10, pos.dy - 22));
+  }
+
+  void _drawAccidental(Canvas canvas, Offset pos, {required bool isFlat, required Paint paint}) {
+    final symbol = isFlat ? '♭' : '♯';
+    final tp = TextPainter(
+      text: TextSpan(
+        text: symbol,
+        style: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.bold,
+          color: paint.color,
+          height: 1.0,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(pos.dx, pos.dy - 6));
   }
 
   @override
@@ -1441,9 +1134,6 @@ class _ScaleStaffPainter extends CustomPainter {
     return old.targetMidi != targetMidi ||
         old.playedMidi != playedMidi ||
         old.isScratching != isScratching ||
-        old.isInTune != isInTune ||
-        old.accidentalCount != accidentalCount ||
-        old.isFlat != isFlat ||
-        old.targetLabel != targetLabel;
+        old.isInTune != isInTune;
   }
 }
