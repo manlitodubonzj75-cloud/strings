@@ -16,6 +16,7 @@ class SongNote {
   final String noteName;
   final ViolinString string;
   final ViolinFinger finger;
+  final int position; // 1, 2, 3, etc. (1st position is default)
   final bool isSlurStart;
   final bool isSlurEnd;
   final int? slurGroupId;
@@ -29,6 +30,7 @@ class SongNote {
     required this.noteName,
     required this.string,
     required this.finger,
+    this.position = 1,
     this.isSlurStart = false,
     this.isSlurEnd = false,
     this.slurGroupId,
@@ -38,6 +40,36 @@ class SongNote {
 
   bool get isSlurred => slurGroupId != null;
   int get endTimeMs => startTimeMs + durationMs;
+
+  SongNote copyWith({
+    int? midiNote,
+    int? startTimeMs,
+    int? durationMs,
+    String? noteName,
+    ViolinString? string,
+    ViolinFinger? finger,
+    int? position,
+    bool? isSlurStart,
+    bool? isSlurEnd,
+    int? slurGroupId,
+    BowDirection? bowDirection,
+    bool? isHit,
+  }) {
+    return SongNote(
+      midiNote: midiNote ?? this.midiNote,
+      startTimeMs: startTimeMs ?? this.startTimeMs,
+      durationMs: durationMs ?? this.durationMs,
+      noteName: noteName ?? this.noteName,
+      string: string ?? this.string,
+      finger: finger ?? this.finger,
+      position: position ?? this.position,
+      isSlurStart: isSlurStart ?? this.isSlurStart,
+      isSlurEnd: isSlurEnd ?? this.isSlurEnd,
+      slurGroupId: slurGroupId ?? this.slurGroupId,
+      bowDirection: bowDirection ?? this.bowDirection,
+      isHit: isHit ?? this.isHit,
+    );
+  }
 }
 
 class Song {

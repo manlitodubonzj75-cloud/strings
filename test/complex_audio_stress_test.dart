@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_print
 import "package:easy_violin/services/audio_transcriber.dart";
 import "package:easy_violin/services/song_audio_generator.dart";
 import "package:easy_violin/services/synthetic_score_testbench.dart";

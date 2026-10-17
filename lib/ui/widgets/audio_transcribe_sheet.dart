@@ -4,17 +4,23 @@ import "package:flutter/material.dart";
 import "../../models/song_model.dart";
 import "../../services/audio_transcriber.dart";
 import "../../services/url_audio_downloader.dart";
+import "../../services/ddsp_violin_synthesizer.dart";
+import "../../services/song_audio_generator.dart";
 import "../../theme/apple_violin_theme.dart";
 
 /// Modal bottom sheet for uploading audio files, downloading via yt-dlp, or recording.
 class AudioTranscribeSheet extends StatefulWidget {
-  final void Function(Song song, String report) onSongTranscribed;
+  final void Function(Song song, String report, Float32List? preRenderedPcm) onSongTranscribed;
   final VoidCallback onClose;
+  final String? initialUrl;
+  final bool autoStart;
 
   const AudioTranscribeSheet({
     super.key,
     required this.onSongTranscribed,
     required this.onClose,
+    this.initialUrl,
+    this.autoStart = false,
   });
 
   @override
@@ -33,7 +39,19 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
   @override
   void initState() {
     super.initState();
+    if (widget.initialUrl != null && widget.initialUrl!.isNotEmpty) {
+      _urlController.text = widget.initialUrl!;
+      _isUrlInputOpen = true;
+    }
     _urlController.addListener(_onUrlChanged);
+
+    if (widget.autoStart && widget.initialUrl != null && widget.initialUrl!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _downloadUrlAndTranscribe();
+        }
+      });
+    }
   }
 
   void _onUrlChanged() {
@@ -176,13 +194,14 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
     });
 
     try {
+      // 1. Audio-to-score transcription (scaled up to 70% progress)
       final res = await AudioTranscriber.transcribeAudioBytes(
         bytes,
         title: title.isEmpty ? "Транскрибированное аудио" : title,
         onProgress: (p, status) {
           if (mounted && reqId == _activeRequestId) {
             setState(() {
-              _progress = startProgress + (p * (1.0 - startProgress));
+              _progress = startProgress + (p * (0.70 - startProgress));
               _statusMessage = status;
             });
           }
@@ -191,12 +210,46 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
 
       if (!mounted || reqId != _activeRequestId) return;
 
+      // 2. Continuous neuro-synthesis (DDSP Violin) so playback is instantly ready
+      setState(() {
+        _progress = 0.70;
+        _statusMessage = "Подготовка ИИ-воспроизведения (DDSP Violin)...";
+      });
+
+      Float32List? pcm;
+      try {
+        pcm = await DdspViolinSynthesizer.synthesizeSong(
+          res.song,
+          speedMultiplier: 1.0,
+          onProgress: (p, status) {
+            if (mounted && reqId == _activeRequestId) {
+              setState(() {
+                _progress = 0.70 + (p * 0.28);
+                _statusMessage = status;
+              });
+            }
+          },
+        );
+      } catch (_) {
+        pcm = SongAudioGenerator.generatePcm(
+          res.song,
+          sampleRate: 44100,
+          speedMultiplier: 1.0,
+          addHarmonics: true,
+          addVibrato: true,
+          addMeasureDynamics: true,
+        );
+      }
+
+      if (!mounted || reqId != _activeRequestId) return;
+
       setState(() {
         _isProcessing = false;
         _progress = 1.0;
+        _statusMessage = "Готово!";
       });
 
-      widget.onSongTranscribed(res.song, res.report);
+      widget.onSongTranscribed(res.song, res.report, pcm);
       widget.onClose(); // Automatically dismiss sheet on success
     } catch (e) {
       if (mounted && reqId == _activeRequestId) {
@@ -228,43 +281,49 @@ class _AudioTranscribeSheetState extends State<AudioTranscribeSheet> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: AppleViolinTheme.appleBlue.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(
-                          Icons.graphic_eq_rounded,
-                          color: AppleViolinTheme.appleBlue,
-                          size: 20,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "AUDIO -> NOTES (AI AMT)",
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1.1,
-                              color: Colors.white,
-                            ),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: AppleViolinTheme.appleBlue.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
                           ),
-                          Text(
-                            "Spotify Basic Pitch • Встроенный YouTube парсер",
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.white.withValues(alpha: 0.6),
-                            ),
+                          child: const Icon(
+                            Icons.graphic_eq_rounded,
+                            color: AppleViolinTheme.appleBlue,
+                            size: 20,
                           ),
-                        ],
-                      ),
-                    ],
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                "AUDIO -> NOTES (AI AMT)",
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.1,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              Text(
+                                "Spotify Basic Pitch • Встроенный YouTube парсер",
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.white.withValues(alpha: 0.6),
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   IconButton(
                     icon: const Icon(Icons.close_rounded, color: Colors.white70),

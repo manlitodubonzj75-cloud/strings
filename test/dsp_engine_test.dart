@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:easy_violin/audio_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -35,6 +36,33 @@ void main() {
         reason: 'MPM accurately detects violin G3 (196 Hz) without octave error');
 
     await sub.cancel();
+    await engine.stop();
+  });
+
+  test('Native tone playback (C++ Bowed Waveguide) and lock-free PCM buffer playback run smoothly', () async {
+    final engine = AudioEngine();
+    await engine.start();
+
+    // 1. Physical Waveguide Playback
+    engine.playTone(440.0, 0.2);
+    expect(engine.isTonePlaying, isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    engine.stopTone();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(engine.isTonePlaying, isFalse);
+
+    // 2. Lock-free PCM Buffer Playback
+    final pcm = Float32List(2048);
+    for (int i = 0; i < 2048; i++) {
+      pcm[i] = 0.5 * (i % 2 == 0 ? 1.0 : -1.0);
+    }
+    engine.playPcmBuffer(pcm);
+    expect(engine.isTonePlaying, isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    engine.stopTone();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(engine.isTonePlaying, isFalse);
+
     await engine.stop();
   });
 }

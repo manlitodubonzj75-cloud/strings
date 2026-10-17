@@ -74,7 +74,7 @@ class SynthTestPanel extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: isMobileMode ? 2 : 3),
       child: GestureDetector(
         onTap: () {
-          audioEngine.pushSynthNote(hz, 0.6);
+          audioEngine.playTone(hz, 0.6);
         },
         child: Container(
           padding: EdgeInsets.symmetric(horizontal: isMobileMode ? 7 : 10, vertical: isMobileMode ? 4 : 6),

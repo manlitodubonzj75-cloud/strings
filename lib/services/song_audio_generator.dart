@@ -74,7 +74,7 @@ class _ViolinBiquad {
 /// - B1+ (Upper bout soundboard resonance): ~580 Hz
 /// - Nasal / reed dip (Anti-resonance notch): ~1500 Hz
 /// - Bridge Hill (Acoustic projection & singer's formant): ~2800 Hz
-/// - Wood absorption (Warm high-frequency rolloff): ~5200 Hz
+/// - Wood absorption (Warm high-frequency rolloff): ~6800 Hz
 class _ViolinBodyFilterBank {
   final _ViolinBiquad _airCavity = _ViolinBiquad();
   final _ViolinBiquad _woodCorpus = _ViolinBiquad();
@@ -84,12 +84,22 @@ class _ViolinBodyFilterBank {
   final _ViolinBiquad _woodDamping = _ViolinBiquad();
 
   _ViolinBodyFilterBank(double sampleRate) {
-    _airCavity.setPeaking(sampleRate, 280.0, 7.5, 3.5);
-    _woodCorpus.setPeaking(sampleRate, 470.0, 10.0, 3.8);
-    _upperBout.setPeaking(sampleRate, 580.0, 5.0, 2.8);
-    _nasalNotch.setPeaking(sampleRate, 1500.0, -3.5, 1.6);
-    _bridgeHill.setPeaking(sampleRate, 2800.0, 6.5, 2.2);
-    _woodDamping.setLowpass(sampleRate, 5200.0, 0.7071);
+    // Smooth, well-balanced formant gains preventing narrow resonance spikes and volume jumps
+    _airCavity.setPeaking(sampleRate, 280.0, 2.2, 1.8);
+    _woodCorpus.setPeaking(sampleRate, 470.0, 2.8, 1.8);
+    _upperBout.setPeaking(sampleRate, 580.0, 1.8, 1.6);
+    _nasalNotch.setPeaking(sampleRate, 1500.0, -1.8, 1.4);
+    _bridgeHill.setPeaking(sampleRate, 2800.0, 2.4, 1.6);
+    _woodDamping.setLowpass(sampleRate, 6800.0, 0.7071);
+  }
+
+  void reset() {
+    _airCavity.reset();
+    _woodCorpus.reset();
+    _upperBout.reset();
+    _nasalNotch.reset();
+    _bridgeHill.reset();
+    _woodDamping.reset();
   }
 
   @pragma('vm:prefer-inline')
@@ -102,11 +112,9 @@ class _ViolinBodyFilterBank {
     s = _woodDamping.process(s);
 
     // Warm wooden soundboard soft saturation:
-    // Padé rational approximation of tanh(x * 0.20)
-    final x = s * 0.20;
-    final x2 = x * x;
-    final sat = (x * (27.0 + x2)) / (27.0 + 9.0 * x2);
-    return sat * 0.82;
+    final x = s * 0.45;
+    final sat = x / (1.0 + x.abs());
+    return sat * 0.90;
   }
 }
 
@@ -116,15 +124,25 @@ class _ViolinBodyFilterBank {
 /// Features:
 /// 1. Helmholtz bowed-string stick-slip excitation with up to 28 phase-dispersed partials.
 /// 2. Multi-stage Stradivarius wooden body resonator filter bank (Air cavity, Wood corpus, Bridge hill).
-/// 3. Organic bow rosin friction noise (~0.5%) for tactile bow hair feel.
-/// 4. Measure-aware phrasing and dynamics (authentic down-bow beat 1 accents).
-/// 5. Natural acoustic vibrato (5.4 Hz pitch modulation with natural onset ramp).
+/// 3. Continuous inter-note phase and decay continuity (zero clicks, zero artificial dropouts).
+/// 4. Fast, authentic bow bite and quick onset (notes sound immediately and clearly).
+/// 5. Subtle, natural musical vibrato (5.4 Hz pitch modulation with natural onset ramp).
 /// 6. Seeking/scrubbing support (`startFromMs`) for instant seamless playback.
-/// 7. Pre-generation slowdown support (`speedMultiplier < 1.0`) so ultra-fast
-///    passages (1/16, 1/32 notes) are rendered with pristine acoustic resolution.
-/// 8. Strict monophonic guarantee: zero acoustic overlap, raised-cosine envelopes.
+/// 7. Monophonic acoustic fidelity without unnatural cutting of note duration.
+/// 8. Master peak normalization and soft-limiting for consistent, stable playback volume.
 class SongAudioGenerator {
   static const int defaultSampleRate = 44100;
+
+  static const int _kSinTableSize = 4096;
+  static const int _kSinTableMask = _kSinTableSize - 1;
+  static final Float64List _sinTable = () {
+    final t = Float64List(_kSinTableSize);
+    final step = (2.0 * math.pi) / _kSinTableSize;
+    for (int i = 0; i < _kSinTableSize; i++) {
+      t[i] = math.sin(i * step);
+    }
+    return t;
+  }();
 
   /// Synthesizes a standalone, warm Stradivarius violin note PCM buffer.
   /// Directly streamable to hardware via [AudioEngine.playPcmBuffer].
@@ -193,7 +211,7 @@ class SongAudioGenerator {
     final samples = Float32List(totalSamples);
     final twoPi = 2.0 * math.pi;
 
-    // Stradivarius body formant resonator filter bank
+    // Stradivarius body formant resonator filter bank (lives across entire piece)
     final bodyFilter = _ViolinBodyFilterBank(sampleRate.toDouble());
 
     // Pre-calculate Helmholtz bowed-string harmonic series weights (1/n slope, subtle odd-harmonic preference)
@@ -202,7 +220,7 @@ class SongAudioGenerator {
     final partialPhases = Float64List(maxPartials);
     for (int n = 1; n <= maxPartials; n++) {
       if (addHarmonics) {
-        final oddBonus = (n % 2 == 1) ? 1.12 : 0.88;
+        final oddBonus = (n % 2 == 1) ? 1.08 : 0.92;
         partialWeights[n - 1] = (1.0 / n) * oddBonus;
         partialPhases[n - 1] = (n * n * 0.015) % twoPi; // subtle string dispersion
       } else {
@@ -211,13 +229,17 @@ class SongAudioGenerator {
       }
     }
 
-    // Measure duration for 4/4 meter dynamics
+    // Measure duration for subtle 4/4 phrasing dynamics
     final effectiveBpm = song.tempoBpm > 0 ? song.tempoBpm : 100;
     final quarterMs = (60000.0 / effectiveBpm).round();
     final measureMs = quarterMs * 4;
 
-    // Rosin noise PRNG seed
+    // Rosin noise PRNG seed and band-limiting 1-pole state
     int rosinSeed = 0x982345;
+    double rosinNoiseFiltered = 0.0;
+
+    // Continuous string phase accumulator across consecutive notes (eliminates waveform jump clicks!)
+    double phase = 0.0;
 
     for (int i = 0; i < song.notes.length; i++) {
       final note = song.notes[i];
@@ -235,7 +257,7 @@ class SongAudioGenerator {
       final effectiveEndMs = note.endTimeMs;
       var durSec = ((effectiveEndMs - effectiveStartMs) * timeDilation) / 1000.0;
 
-      // Determine next note start time to enforce strict monophony
+      // Determine next note start time
       double? nextStartSec;
       bool isSlurredToNext = false;
       bool isSamePitchAsNext = false;
@@ -250,25 +272,28 @@ class SongAudioGenerator {
         }
       }
 
-      // Enforce zero overlap: note MUST end before or exactly at next note start
+      // Enforce zero overlap: note ends before or at next note start
       if (nextStartSec != null && startSec + durSec > nextStartSec) {
-        durSec = math.max(0.012, nextStartSec - startSec);
+        durSec = math.max(0.015, nextStartSec - startSec);
       }
 
-      // Articulation gap:
-      // - Slurred notes: 0 gap (continuous bowing)
-      // - Repeated notes of same pitch: 18-35ms turnaround gap
-      // - Detached notes: 12-25ms turnaround gap
+      // Natural acoustic violin articulation:
+      // In real violin playing, the bow does NOT stop into prolonged silence on every note!
+      // - Consecutive melodic notes (different pitches): 0 gap (continuous bowing / legato)
+      // - Repeated notes of same pitch: subtle 5-8ms bow reversal turnaround
+      // - Slurred notes: 0 gap
       final double gapSec;
-      if (isSlurredToNext) {
+      final bool isContiguous = (nextStartSec != null && (nextStartSec - (startSec + durSec)).abs() <= 0.015);
+
+      if (isSlurredToNext || (isContiguous && !isSamePitchAsNext)) {
         gapSec = 0.0;
       } else if (isSamePitchAsNext) {
-        gapSec = math.min(0.035, math.max(0.018, durSec * 0.22));
+        gapSec = math.min(0.008, durSec * 0.08);
       } else {
-        gapSec = math.min(0.025, math.max(0.012, durSec * 0.15));
+        gapSec = math.min(0.006, durSec * 0.06);
       }
 
-      final activeSoundDurSec = math.max(0.012, durSec - gapSec);
+      final activeSoundDurSec = math.max(0.015, durSec - gapSec);
 
       final startSample = (startSec * sampleRate).round();
       final numSoundSamples = (activeSoundDurSec * sampleRate).round();
@@ -276,34 +301,33 @@ class SongAudioGenerator {
       if (startSample >= totalSamples) break;
       final endSample = math.min(totalSamples, startSample + numSoundSamples);
 
-      // Measure dynamics: beat 1 down-bow accent (+20%), beat 3 (+10%)
+      // Subtle musical measure dynamics: beat 1 accent (+4%), never crushing other notes
       double dynamicScale = 1.0;
       if (addMeasureDynamics && measureMs > 0) {
         final posInMeasure = (note.startTimeMs % measureMs) / measureMs;
         if (posInMeasure < 0.25) {
-          dynamicScale = 1.20; // Measure downbeat
+          dynamicScale = 1.04;
         } else if (posInMeasure >= 0.50 && posInMeasure < 0.75) {
-          dynamicScale = 1.08; // Secondary accent
+          dynamicScale = 1.02;
         } else {
-          dynamicScale = 0.95;
+          dynamicScale = 0.98;
         }
       }
 
-      // Natural acoustic violin attack & release envelopes:
-      // Fast notes (<120ms): 10-18ms crisp bite
-      // Sustained notes: 25-35ms smooth bow onset
-      final double attackTimeSec = math.min(0.028, activeSoundDurSec * 0.20);
-      final double releaseTimeSec = math.min(0.040, activeSoundDurSec * 0.25);
+      // Fast, immediate bow attack so the note speaks promptly (8-12ms)
+      final double attackTimeSec = math.min(0.012, activeSoundDurSec * 0.12);
+      final double releaseTimeSec = math.min(0.012, activeSoundDurSec * 0.12);
       final attackSamples = math.max(1, (attackTimeSec * sampleRate).round());
       final releaseSamples = math.max(1, (releaseTimeSec * sampleRate).round());
 
-      double phase = 0.0;
+      final nyquist = sampleRate * 0.46;
+      final radToTable = _kSinTableSize / twoPi;
 
       for (int s = startSample; s < endSample; s++) {
         final relSample = s - startSample;
         final t = relSample / sampleRate.toDouble();
 
-        // Compute amplitude envelope
+        // Amplitude envelope (smooth raised-cosine at boundaries)
         double env = 1.0;
         if (relSample < attackSamples) {
           final p = relSample / attackSamples;
@@ -313,38 +337,67 @@ class SongAudioGenerator {
           env = 0.5 * (1.0 - math.cos(math.pi * p)); // smooth 1->0
         }
 
-        // Natural violin vibrato: 5.4 Hz modulation ramping in after 60ms (~18 cents depth)
+        // Natural violin vibrato: 5.4 Hz modulation ramping in after 70ms (~14 cents depth)
         double currentFreq = freqHz;
-        if (addVibrato && activeSoundDurSec >= 0.16) {
-          final vibRamp = math.min(1.0, math.max(0.0, (t - 0.06) / 0.10));
-          final vibMod = 0.0105 * vibRamp * math.sin(twoPi * 5.4 * t);
+        if (addVibrato && activeSoundDurSec >= 0.20) {
+          final vibRamp = math.min(1.0, math.max(0.0, (t - 0.07) / 0.12));
+          final vibMod = 0.0085 * vibRamp * math.sin(twoPi * 5.4 * t);
           currentFreq = freqHz * (1.0 + vibMod);
         }
 
         phase += twoPi * currentFreq / sampleRate;
         if (phase >= twoPi) phase -= twoPi;
 
-        // Sum Helmholtz partials with band-limited cutoff
+        // Sum Helmholtz partials with band-limited cutoff (L1 cache-friendly wavetable lookup)
         double excitation = 0.0;
-        final nyquist = sampleRate * 0.46;
         for (int h = 0; h < maxPartials; h++) {
           final harmonicFreq = currentFreq * (h + 1);
           if (harmonicFreq >= nyquist) break;
-          excitation += partialWeights[h] * math.sin((h + 1) * phase + partialPhases[h]);
+          final ph = (h + 1) * phase + partialPhases[h];
+          final tableIdx = (ph * radToTable).toInt() & _kSinTableMask;
+          excitation += partialWeights[h] * _sinTable[tableIdx];
         }
 
-        // Add subtle horsehair rosin friction noise (~0.5%)
+        // Add band-limited horsehair rosin friction noise
         rosinSeed = (rosinSeed * 1664525 + 1013904223) & 0xFFFFFFFF;
-        final noiseVal = ((rosinSeed.toSigned(32) / 2147483648.0) * 0.005);
-        excitation += noiseVal * env;
+        final rawNoise = (rosinSeed.toSigned(32) / 2147483648.0);
+        rosinNoiseFiltered = rosinNoiseFiltered * 0.80 + rawNoise * 0.20;
+        excitation += rosinNoiseFiltered * 0.0012;
+
+        // Shape physical excitation before resonator body
+        final shapedExcitation = excitation * env * dynamicScale;
 
         // Process through Stradivarius wooden body resonator
-        final violinSample = bodyFilter.process(excitation);
+        final violinSample = bodyFilter.process(shapedExcitation);
 
-        // Apply dynamic scale and envelope
-        final current = samples[s];
-        final addition = violinSample * env * dynamicScale;
-        samples[s] = (current + addition).clamp(-1.0, 1.0);
+        // Accumulate smoothly
+        samples[s] += violinSample;
+      }
+    }
+
+    // Master Peak Normalization and Soft Limiter:
+    // Guarantees stable, consistent loudness across all pieces and prevents digital clipping
+    double maxPeak = 0.0;
+    for (int i = 0; i < totalSamples; i++) {
+      final a = samples[i].abs();
+      if (a > maxPeak) maxPeak = a;
+    }
+
+    if (maxPeak > 1e-5) {
+      const targetPeak = 0.88; // -1.1 dBFS
+      final normScale = targetPeak / maxPeak;
+      for (int i = 0; i < totalSamples; i++) {
+        final scaled = samples[i] * normScale;
+        // Soft-knee limiter: absolutely transparent below 0.80, smoothly rounding peaks above 0.80
+        if (scaled > 0.80) {
+          final diff = (scaled - 0.80) / 0.15;
+          samples[i] = 0.80 + 0.15 * (diff / (1.0 + diff.abs()));
+        } else if (scaled < -0.80) {
+          final diff = (-scaled - 0.80) / 0.15;
+          samples[i] = -0.80 - 0.15 * (diff / (1.0 + diff.abs()));
+        } else {
+          samples[i] = scaled;
+        }
       }
     }
 

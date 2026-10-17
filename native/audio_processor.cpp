@@ -111,11 +111,9 @@ public:
         pending_stop_.store(true, std::memory_order_release);
         NoteEvent discard;
         while (note_queue_.pull(discard)) {}
-        {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            pcm_stream_.clear();
-            pcm_read_pos_ = 0;
-        }
+        synth_.noteOff();
+        pcm_ptr_.store(nullptr, std::memory_order_release);
+        pcm_pos_.store(0, std::memory_order_release);
         is_playing_.store(false, std::memory_order_release);
     }
 
@@ -124,12 +122,19 @@ public:
             stop();
             return;
         }
-        stop();
-        {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            pcm_stream_.assign(samples, samples + count);
-            pcm_read_pos_ = 0;
-        }
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        synth_.noteOff();
+
+        const int next_idx = 1 - active_buf_idx_.load(std::memory_order_relaxed);
+        pcm_buffers_[next_idx].assign(samples, samples + count);
+
+        pcm_ptr_.store(nullptr, std::memory_order_release);
+        pcm_pos_.store(0, std::memory_order_release);
+        pcm_size_.store(count, std::memory_order_release);
+        active_buf_idx_.store(next_idx, std::memory_order_release);
+        pcm_ptr_.store(pcm_buffers_[next_idx].data(), std::memory_order_release);
+
         pending_stop_.store(false, std::memory_order_release);
         is_playing_.store(true, std::memory_order_release);
         if (queue_) {
@@ -162,11 +167,7 @@ public:
 
         if (pending_stop_.load(std::memory_order_acquire)) {
             synth_.noteOff();
-            {
-                std::lock_guard<std::mutex> lock(pcm_mutex_);
-                pcm_stream_.clear();
-                pcm_read_pos_ = 0;
-            }
+            pcm_ptr_.store(nullptr, std::memory_order_release);
             is_playing_.store(false, std::memory_order_release);
             std::memset(out, 0, buffer->mAudioDataBytesCapacity);
             buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
@@ -181,19 +182,28 @@ public:
             return;
         }
 
-        // Direct PCM stream playback
-        {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            if (!pcm_stream_.empty() && pcm_read_pos_ < pcm_stream_.size()) {
-                const std::size_t remaining = pcm_stream_.size() - pcm_read_pos_;
+        // Direct PCM stream playback (100% lock-free, zero allocation on real-time audio thread)
+        const float* pcm = pcm_ptr_.load(std::memory_order_acquire);
+        if (pcm != nullptr) {
+            const std::size_t size = pcm_size_.load(std::memory_order_relaxed);
+            std::size_t pos = pcm_pos_.load(std::memory_order_relaxed);
+            if (pos < size) {
+                const std::size_t remaining = size - pos;
                 const std::size_t to_copy = std::min(static_cast<std::size_t>(count), remaining);
-                std::memcpy(out, pcm_stream_.data() + pcm_read_pos_, to_copy * sizeof(float));
-                pcm_read_pos_ += to_copy;
+                std::memcpy(out, pcm + pos, to_copy * sizeof(float));
+                pos += to_copy;
+                pcm_pos_.store(pos, std::memory_order_release);
 
                 if (to_copy < count) {
+                    constexpr std::size_t kFadeLen = 32;
+                    if (to_copy >= kFadeLen) {
+                        for (std::size_t f = 0; f < kFadeLen; ++f) {
+                            const float gain = static_cast<float>(kFadeLen - 1 - f) / static_cast<float>(kFadeLen);
+                            out[to_copy - kFadeLen + f] *= gain;
+                        }
+                    }
                     std::memset(out + to_copy, 0, (count - to_copy) * sizeof(float));
-                    pcm_stream_.clear();
-                    pcm_read_pos_ = 0;
+                    pcm_ptr_.store(nullptr, std::memory_order_release);
                     is_playing_.store(false, std::memory_order_release);
                 } else {
                     is_playing_.store(true, std::memory_order_release);
@@ -201,6 +211,9 @@ public:
                 buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
                 if (queue_) AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
                 return;
+            } else {
+                pcm_ptr_.store(nullptr, std::memory_order_release);
+                is_playing_.store(false, std::memory_order_release);
             }
         }
 
@@ -246,9 +259,11 @@ private:
     std::atomic<bool> is_playing_{false};
     std::atomic<bool> pending_stop_{false};
     BowedViolinModel synth_{44100.0f};
-    std::mutex pcm_mutex_;
-    std::vector<float> pcm_stream_;
-    std::size_t pcm_read_pos_{0};
+    std::vector<float> pcm_buffers_[2];
+    std::atomic<int> active_buf_idx_{0};
+    std::atomic<const float*> pcm_ptr_{nullptr};
+    std::atomic<std::size_t> pcm_size_{0};
+    std::atomic<std::size_t> pcm_pos_{0};
 };
 
 bool isAudioTonePlaying() noexcept {
@@ -334,11 +349,9 @@ public:
         pending_stop_.store(true, std::memory_order_release);
         NoteEvent discard;
         while (note_queue_.pull(discard)) {}
-        {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            pcm_stream_.clear();
-            pcm_read_pos_ = 0;
-        }
+        synth_.noteOff();
+        pcm_ptr_.store(nullptr, std::memory_order_release);
+        pcm_pos_.store(0, std::memory_order_release);
         is_playing_.store(false, std::memory_order_release);
     }
 
@@ -347,11 +360,19 @@ public:
             stop();
             return;
         }
-        {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            pcm_stream_.assign(samples, samples + count);
-            pcm_read_pos_ = 0;
-        }
+        NoteEvent discard;
+        while (note_queue_.pull(discard)) {}
+        synth_.noteOff();
+
+        const int next_idx = 1 - active_buf_idx_.load(std::memory_order_relaxed);
+        pcm_buffers_[next_idx].assign(samples, samples + count);
+
+        pcm_ptr_.store(nullptr, std::memory_order_release);
+        pcm_pos_.store(0, std::memory_order_release);
+        pcm_size_.store(count, std::memory_order_release);
+        active_buf_idx_.store(next_idx, std::memory_order_release);
+        pcm_ptr_.store(pcm_buffers_[next_idx].data(), std::memory_order_release);
+
         pending_stop_.store(false, std::memory_order_release);
         is_playing_.store(true, std::memory_order_release);
 
@@ -403,21 +424,29 @@ public:
             return;
         }
 
-        if (!pcm_stream_.empty()) {
-            std::lock_guard<std::mutex> lock(pcm_mutex_);
-            for (int32_t i = 0; i < numFrames; ++i) {
-                if (pcm_read_pos_ < pcm_stream_.size()) {
-                    out[i] = pcm_stream_[pcm_read_pos_++];
+        const float* pcm = pcm_ptr_.load(std::memory_order_acquire);
+        if (pcm != nullptr) {
+            const std::size_t size = pcm_size_.load(std::memory_order_relaxed);
+            std::size_t pos = pcm_pos_.load(std::memory_order_relaxed);
+            if (pos < size) {
+                const std::size_t remaining = size - pos;
+                const std::size_t to_copy = std::min(static_cast<std::size_t>(numFrames), remaining);
+                std::memcpy(out, pcm + pos, to_copy * sizeof(float));
+                pos += to_copy;
+                pcm_pos_.store(pos, std::memory_order_release);
+
+                if (to_copy < static_cast<std::size_t>(numFrames)) {
+                    std::memset(out + to_copy, 0, (numFrames - to_copy) * sizeof(float));
+                    pcm_ptr_.store(nullptr, std::memory_order_release);
+                    is_playing_.store(false, std::memory_order_release);
                 } else {
-                    out[i] = 0.0f;
+                    is_playing_.store(true, std::memory_order_release);
                 }
-            }
-            if (pcm_read_pos_ >= pcm_stream_.size()) {
-                pcm_stream_.clear();
-                pcm_read_pos_ = 0;
+                return;
+            } else {
+                pcm_ptr_.store(nullptr, std::memory_order_release);
                 is_playing_.store(false, std::memory_order_release);
             }
-            return;
         }
 
         int32_t generated = 0;
@@ -518,9 +547,11 @@ private:
     BowedViolinModel synth_{44100.0f};
     bool is_float_format_{true};
     std::vector<float> float_buf_;
-    std::mutex pcm_mutex_;
-    std::vector<float> pcm_stream_;
-    std::size_t pcm_read_pos_{0};
+    std::vector<float> pcm_buffers_[2];
+    std::atomic<int> active_buf_idx_{0};
+    std::atomic<const float*> pcm_ptr_{nullptr};
+    std::atomic<std::size_t> pcm_size_{0};
+    std::atomic<std::size_t> pcm_pos_{0};
 };
 
 bool isAudioTonePlaying() noexcept {

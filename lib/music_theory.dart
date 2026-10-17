@@ -29,7 +29,7 @@ enum ViolinString {
   static const List<ViolinString> inOrder = [g, d, a, e];
 }
 
-/// Finger label for violin fingering in 1st position
+/// Finger label for violin fingering
 enum ViolinFinger {
   open(0, '0 (Открытая)'),
   first(1, '1-й палец'),
@@ -50,6 +50,7 @@ class ViolinFingering {
   final int midiNote;
   final double standardHz;
   final double positionFraction;
+  final int position; // 1, 2, 3...
 
   const ViolinFingering({
     required this.string,
@@ -58,6 +59,7 @@ class ViolinFingering {
     required this.midiNote,
     required this.standardHz,
     required this.positionFraction,
+    this.position = 1,
   });
 
   double frequencyHz(double concertA4Hz) => standardHz * (concertA4Hz / 440.0);
@@ -127,13 +129,45 @@ class MusicTheory {
     'До', 'До#', 'Ре', 'Ре#', 'Ми', 'Фа', 'Фа#', 'Соль', 'Соль#', 'Ля', 'Ля#', 'Си'
   ];
 
-  /// Standard 1st position violin fingerings
-  static final List<ViolinFingering> firstPositionFingerings = _buildFingerings();
+  /// Roman numeral conversion for violin positions
+  static String positionToRoman(int position) {
+    switch (position) {
+      case 1:
+        return 'I';
+      case 2:
+        return 'II';
+      case 3:
+        return 'III';
+      case 4:
+        return 'IV';
+      case 5:
+        return 'V';
+      default:
+        return '$position';
+    }
+  }
 
-  static List<ViolinFingering> _buildFingerings() {
+  /// Standard 1st position violin fingerings
+  static final List<ViolinFingering> firstPositionFingerings = _buildFingerings(1);
+  static final List<ViolinFingering> secondPositionFingerings = _buildFingerings(2);
+  static final List<ViolinFingering> thirdPositionFingerings = _buildFingerings(3);
+
+  static List<ViolinFingering> getFingeringsForPosition(int pos) {
+    switch (pos) {
+      case 2:
+        return secondPositionFingerings;
+      case 3:
+        return thirdPositionFingerings;
+      case 1:
+      default:
+        return firstPositionFingerings;
+    }
+  }
+
+  static List<ViolinFingering> _buildFingerings([int targetPosition = 1]) {
     final list = <ViolinFingering>[];
 
-    void add(ViolinString string, int semitonesFromOpen, ViolinFinger finger) {
+    void add(ViolinString string, int semitonesFromOpen, ViolinFinger finger, int pos) {
       final midi = string.openMidi + semitonesFromOpen;
       final hz = midiToHz(midi, concertA4Hz: 440.0);
       final noteName = midiToNoteName(midi);
@@ -146,24 +180,103 @@ class MusicTheory {
         midiNote: midi,
         standardHz: hz,
         positionFraction: position,
+        position: pos,
       ));
     }
 
-    // In violin pedagogy, open strings and standard 0-3 fingerings on each string take priority:
-    // E.g. A4 is open A string (0th finger), E5 is open E string (0th finger).
-    for (final str in [ViolinString.e, ViolinString.a, ViolinString.d, ViolinString.g]) {
-      add(str, 0, ViolinFinger.open);
-      add(str, 2, ViolinFinger.first);
-      add(str, 3, ViolinFinger.lowSecond);
-      add(str, 4, ViolinFinger.highSecond);
-      add(str, 5, ViolinFinger.third);
-    }
-    // Register 4th fingers (which overlap with the next open string)
-    for (final str in [ViolinString.g, ViolinString.d, ViolinString.a, ViolinString.e]) {
-      add(str, 7, ViolinFinger.fourth);
+    if (targetPosition == 1) {
+      // In violin pedagogy, open strings and standard 0-3 fingerings on each string take priority:
+      // E.g. A4 is open A string (0th finger), E5 is open E string (0th finger).
+      for (final str in [ViolinString.e, ViolinString.a, ViolinString.d, ViolinString.g]) {
+        add(str, 0, ViolinFinger.open, 1);
+        add(str, 1, ViolinFinger.first, 1); // low 1st finger
+        add(str, 2, ViolinFinger.first, 1);
+        add(str, 3, ViolinFinger.lowSecond, 1);
+        add(str, 4, ViolinFinger.highSecond, 1);
+        add(str, 5, ViolinFinger.third, 1);
+        add(str, 6, ViolinFinger.third, 1); // high 3rd finger
+      }
+      // Register 4th fingers (which overlap with the next open string)
+      for (final str in [ViolinString.g, ViolinString.d, ViolinString.a, ViolinString.e]) {
+        add(str, 7, ViolinFinger.fourth, 1);
+      }
+    } else if (targetPosition == 2) {
+      // 2nd Position (II): 1st finger sits around semitone 3..4 above open string
+      for (final str in [ViolinString.g, ViolinString.d, ViolinString.a, ViolinString.e]) {
+        add(str, 3, ViolinFinger.first, 2);
+        add(str, 4, ViolinFinger.first, 2);
+        add(str, 5, ViolinFinger.lowSecond, 2);
+        add(str, 6, ViolinFinger.highSecond, 2);
+        add(str, 7, ViolinFinger.third, 2);
+        add(str, 8, ViolinFinger.fourth, 2);
+        add(str, 9, ViolinFinger.fourth, 2);
+      }
+    } else if (targetPosition == 3) {
+      // 3rd Position (III): Hand rests against ribs. 1st finger sits around semitone 5..6
+      for (final str in [ViolinString.g, ViolinString.d, ViolinString.a, ViolinString.e]) {
+        add(str, 5, ViolinFinger.first, 3);
+        add(str, 6, ViolinFinger.first, 3);
+        add(str, 7, ViolinFinger.lowSecond, 3);
+        add(str, 8, ViolinFinger.highSecond, 3);
+        add(str, 9, ViolinFinger.third, 3);
+        add(str, 10, ViolinFinger.fourth, 3);
+        add(str, 11, ViolinFinger.fourth, 3);
+        add(str, 12, ViolinFinger.fourth, 3);
+      }
     }
 
     return list;
+  }
+
+  /// Returns all valid fingering options (string, finger, position) for a given MIDI note
+  static List<ViolinFingering> getCandidatesForMidi(int midiNote, {int maxPosition = 3}) {
+    final result = <ViolinFingering>[];
+
+    // 1. Open string candidate
+    for (final str in ViolinString.values) {
+      if (str.openMidi == midiNote) {
+        result.add(ViolinFingering(
+          string: str,
+          finger: ViolinFinger.open,
+          noteName: midiToNoteName(midiNote),
+          midiNote: midiNote,
+          standardHz: midiToHz(midiNote),
+          positionFraction: 0.0,
+          position: 1,
+        ));
+      }
+    }
+
+    // 2. Positions from 1 up to maxPosition
+    for (int p = 1; p <= maxPosition; p++) {
+      final list = getFingeringsForPosition(p);
+      for (final f in list) {
+        if (f.midiNote == midiNote && f.finger != ViolinFinger.open) {
+          // Avoid duplicate (string, finger, position)
+          if (!result.any((r) => r.string == f.string && r.finger == f.finger && r.position == f.position)) {
+            result.add(f);
+          }
+        }
+      }
+    }
+
+    // 3. Fallback for high notes on E string (above 3rd pos reach, e.g. D#6, E6, etc.)
+    if (result.isEmpty && midiNote > 76) {
+      final semitones = midiNote - 76;
+      final pos = math.max(1, (semitones / 2).floor());
+      final finger = semitones > 10 ? ViolinFinger.fourth : ViolinFinger.third;
+      result.add(ViolinFingering(
+        string: ViolinString.e,
+        finger: finger,
+        noteName: midiToNoteName(midiNote),
+        midiNote: midiNote,
+        standardHz: midiToHz(midiNote),
+        positionFraction: 1.0 - math.pow(2.0, -semitones / 12.0),
+        position: pos,
+      ));
+    }
+
+    return result;
   }
 
   static double hzToMidi(double hz, {double concertA4Hz = 440.0}) {

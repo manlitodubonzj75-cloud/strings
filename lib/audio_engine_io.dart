@@ -332,6 +332,14 @@ class AudioEngine {
       _isTonePlayingDart = false;
     });
 
+    // 1. Prefer native zero-latency physical waveguide synth
+    final fn = _playTone;
+    if (fn != null) {
+      fn(frequencyHz, durationSec);
+      return;
+    }
+
+    // 2. Fallback to additive PCM synthesis if native tone playback is unavailable
     final pcmFn = _playPcmBuffer;
     if (pcmFn != null && frequencyHz > 20.0) {
       final pcm = SongAudioGenerator.generateSingleNotePcm(frequencyHz, durationSec);
@@ -339,12 +347,7 @@ class AudioEngine {
       return;
     }
 
-    final fn = _playTone;
-    if (fn != null) {
-      fn(frequencyHz, durationSec);
-    } else {
-      pushSynthNote(frequencyHz, durationSec);
-    }
+    pushSynthNote(frequencyHz, durationSec);
   }
 
   /// Immediately silences any active acoustic tone or synthesizer output.

@@ -42,13 +42,15 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
   double _smoothStability = 0.0;   // 0.0 to 1.0 confidence/smoothness
 
   @override
-  Widget build(BuildContext context) {
-    final note = widget.currentNote;
-    final isListening = widget.audioEngine.isRunning;
-    final isScratching = note?.isScratching ?? false;
-    final isMobile = widget.isMobileMode;
+  void didUpdateWidget(TunerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentNote != widget.currentNote) {
+      _updatePhysicsMetrics(widget.currentNote);
+    }
+  }
 
-    // Update dynamic physics metrics
+  void _updatePhysicsMetrics(DetectedNoteInfo? note) {
+    final isScratching = note?.isScratching ?? false;
     if (note != null && note.rawHz > 0) {
       if (isScratching) {
         _smoothBowPressure = _smoothBowPressure * 0.3 + 0.95 * 0.7;
@@ -62,6 +64,16 @@ class _TunerScreenState extends State<TunerScreen> with SingleTickerProviderStat
       _smoothBowPressure = _smoothBowPressure * 0.85 + 0.40 * 0.15;
       _smoothStability = _smoothStability * 0.8;
     }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final note = widget.currentNote;
+    final isListening = widget.audioEngine.isRunning;
+    final isScratching = note?.isScratching ?? false;
+    final isMobile = widget.isMobileMode;
+
+// Dynamic physics metrics updated in didUpdateWidget
 
     // --- MODE 1: ТЮНЕР (Настройка струн) ---
     final ViolinString effectiveTunerString;

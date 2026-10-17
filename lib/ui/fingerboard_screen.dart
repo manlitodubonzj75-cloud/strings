@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../audio_engine.dart';
 import '../music_theory.dart';
 
-class FingerboardScreen extends StatelessWidget {
+class FingerboardScreen extends StatefulWidget {
   final AudioEngine audioEngine;
   final DetectedNoteInfo? currentNote;
   final ValueNotifier<DetectedNoteInfo?>? noteNotifier;
@@ -15,6 +15,24 @@ class FingerboardScreen extends StatelessWidget {
   });
 
   @override
+  State<FingerboardScreen> createState() => _FingerboardScreenState();
+}
+
+class _FingerboardScreenState extends State<FingerboardScreen> {
+  int _selectedPosition = 1; // 1 = 1st, 2 = 2nd, 3 = 3rd, 0 = All
+
+  List<ViolinFingering> get _displayedFingerings {
+    if (_selectedPosition == 0) {
+      return [
+        ...MusicTheory.firstPositionFingerings,
+        ...MusicTheory.secondPositionFingerings,
+        ...MusicTheory.thirdPositionFingerings,
+      ];
+    }
+    return MusicTheory.getFingeringsForPosition(_selectedPosition);
+  }
+
+  @override
   Widget build(BuildContext context) {
     Widget buildBody(DetectedNoteInfo? note) {
       final activeFingering = note?.bestFingering;
@@ -24,7 +42,9 @@ class FingerboardScreen extends StatelessWidget {
         child: Column(
           children: [
             _buildActiveNoteBanner(activeFingering),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
+            _buildPositionSelector(),
+            const SizedBox(height: 10),
             Expanded(
               child: Container(
                 width: double.infinity,
@@ -41,9 +61,11 @@ class FingerboardScreen extends StatelessWidget {
                         size: Size(constraints.maxWidth, constraints.maxHeight),
                         painter: ViolinFingerboardPainter(
                           activeFingering: activeFingering,
+                          displayedFingerings: _displayedFingerings,
                           activeHz: note?.rawHz,
                           isScratching: note?.isScratching ?? false,
                           isInTune: note?.isInTune ?? false,
+                          selectedPosition: _selectedPosition,
                         ),
                         child: _buildInteractiveOverlay(constraints.maxWidth, constraints.maxHeight),
                       );
@@ -52,7 +74,7 @@ class FingerboardScreen extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             const Text(
               'Нажмите на ноту, чтобы услышать эталонное звучание',
               style: TextStyle(fontSize: 12, color: Colors.white38),
@@ -62,13 +84,68 @@ class FingerboardScreen extends StatelessWidget {
       );
     }
 
-    if (noteNotifier != null) {
+    if (widget.noteNotifier != null) {
       return ValueListenableBuilder<DetectedNoteInfo?>(
-        valueListenable: noteNotifier!,
+        valueListenable: widget.noteNotifier!,
         builder: (context, note, child) => buildBody(note),
       );
     }
-    return buildBody(currentNote);
+    return buildBody(widget.currentNote);
+  }
+
+  Widget _buildPositionSelector() {
+    final positions = [
+      (1, 'I позиция'),
+      (2, 'II позиция'),
+      (3, 'III позиция'),
+      (0, 'Все позиции'),
+    ];
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: positions.map((p) {
+          final isSelected = _selectedPosition == p.$1;
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4.0),
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () {
+                  setState(() {
+                    _selectedPosition = p.$1;
+                  });
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? const Color(0xFF2563EB).withValues(alpha: 0.25)
+                        : Colors.white.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isSelected ? const Color(0xFF60A5FA) : Colors.white10,
+                      width: 1.2,
+                    ),
+                  ),
+                  child: Text(
+                    p.$2,
+                    style: TextStyle(
+                      color: isSelected ? const Color(0xFF60A5FA) : Colors.white60,
+                      fontSize: 12,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
   }
 
   Widget _buildActiveNoteBanner(ViolinFingering? fingering) {
@@ -109,7 +186,7 @@ class FingerboardScreen extends StatelessWidget {
           ),
           if (fingering != null)
             Text(
-              fingering.finger.label,
+              '${fingering.finger.label}${fingering.position > 1 ? " • Поз. ${MusicTheory.positionToRoman(fingering.position)}" : ""}',
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
@@ -122,15 +199,13 @@ class FingerboardScreen extends StatelessWidget {
   }
 
   Widget _buildInteractiveOverlay(double width, double height) {
-    // Allows tapping finger positions to synthesize notes
     final nutY = height * 0.10;
     final boardHeight = height * 0.85;
-
     final stringSpacing = width / 5.0;
 
     return Stack(
       children: [
-        for (final fingering in MusicTheory.firstPositionFingerings)
+        for (final fingering in _displayedFingerings)
           Positioned(
             left: stringSpacing * (4 - fingering.string.order) - 22,
             top: fingering.finger == ViolinFinger.open
@@ -138,7 +213,7 @@ class FingerboardScreen extends StatelessWidget {
                 : nutY + (fingering.positionFraction / 0.35) * boardHeight - 16,
             child: GestureDetector(
               onTap: () {
-                audioEngine.pushSynthNote(fingering.standardHz, 0.6);
+                widget.audioEngine.playTone(fingering.standardHz, 0.6);
               },
               child: Container(
                 width: 44,
@@ -158,15 +233,19 @@ class FingerboardScreen extends StatelessWidget {
 
 class ViolinFingerboardPainter extends CustomPainter {
   final ViolinFingering? activeFingering;
+  final List<ViolinFingering> displayedFingerings;
   final double? activeHz;
   final bool isScratching;
   final bool isInTune;
+  final int selectedPosition;
 
   ViolinFingerboardPainter({
     required this.activeFingering,
+    required this.displayedFingerings,
     required this.activeHz,
     required this.isScratching,
     required this.isInTune,
+    this.selectedPosition = 1,
   });
 
   @override
@@ -202,13 +281,35 @@ class ViolinFingerboardPainter extends CustomPainter {
       nutPaint,
     );
 
-    // Draw standard finger tape guides (1st, 2nd, 3rd, 4th tape)
-    final tapePositions = [
-      (0.109 / 0.35, '1-й'),      // ~2 semitones
-      (0.206 / 0.35, '2-й (выс.)'), // ~4 semitones
-      (0.250 / 0.35, '3-й'),      // ~5 semitones
-      (0.330 / 0.35, '4-й'),      // ~7 semitones
-    ];
+    // Draw finger tape guides according to selected position
+    final List<(double, String)> tapePositions;
+    if (selectedPosition == 1) {
+      tapePositions = [
+        (0.109 / 0.35, '1-й (I)'),
+        (0.206 / 0.35, '2-й (I)'),
+        (0.250 / 0.35, '3-й (I)'),
+        (0.330 / 0.35, '4-й (I)'),
+      ];
+    } else if (selectedPosition == 2) {
+      tapePositions = [
+        (0.158 / 0.35, '1-й (II)'),
+        (0.250 / 0.35, '2-й (II)'),
+        (0.292 / 0.35, '3-й (II)'),
+        (0.365 / 0.35, '4-й (II)'),
+      ];
+    } else if (selectedPosition == 3) {
+      tapePositions = [
+        (0.250 / 0.35, '1-й (III)'),
+        (0.330 / 0.35, '2-й (III)'),
+        (0.365 / 0.35, '3-й (III)'),
+        (0.435 / 0.35, '4-й (III)'),
+      ];
+    } else {
+      tapePositions = [
+        (0.109 / 0.35, 'I поз.'),
+        (0.250 / 0.35, 'III поз.'),
+      ];
+    }
 
     final tapePaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.12)
@@ -219,6 +320,7 @@ class ViolinFingerboardPainter extends CustomPainter {
 
     for (final tape in tapePositions) {
       final y = nutY + tape.$1 * boardHeight;
+      if (y > height) continue;
       canvas.drawLine(
         Offset(width * 0.12, y),
         Offset(width * 0.88, y),
@@ -270,12 +372,14 @@ class ViolinFingerboardPainter extends CustomPainter {
       textPainter.paint(canvas, Offset(x - textPainter.width / 2, nutY - 28));
     }
 
-    // Draw note dots for all first position notes
-    for (final f in MusicTheory.firstPositionFingerings) {
+    // Draw note dots for displayed fingerings
+    for (final f in displayedFingerings) {
       final x = stringSpacing * (4 - f.string.order);
       final y = f.finger == ViolinFinger.open
           ? nutY - 14
           : nutY + (f.positionFraction / 0.35) * boardHeight;
+
+      if (y > height) continue;
 
       final isCurrent = activeFingering?.midiNote == f.midiNote &&
           activeFingering?.string == f.string;
@@ -341,6 +445,8 @@ class ViolinFingerboardPainter extends CustomPainter {
     return oldDelegate.activeFingering != activeFingering ||
         oldDelegate.activeHz != activeHz ||
         oldDelegate.isScratching != isScratching ||
-        oldDelegate.isInTune != isInTune;
+        oldDelegate.isInTune != isInTune ||
+        oldDelegate.selectedPosition != selectedPosition ||
+        oldDelegate.displayedFingerings != displayedFingerings;
   }
 }

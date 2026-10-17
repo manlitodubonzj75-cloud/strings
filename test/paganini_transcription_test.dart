@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_print
 import "dart:io";
 import "package:easy_violin/services/audio_transcriber.dart";
 import "package:flutter_test/flutter_test.dart";

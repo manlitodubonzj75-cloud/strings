@@ -58,7 +58,7 @@ class MainActivity : FlutterActivity() {
         // 2. Native Audio Decoder Channel (Hardware-accelerated MediaCodec for AAC/MP3/M4A -> WAV)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AUDIO_DECODER_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                "decodeToWav" -> {
+                "decodeToWav", "decodeAudioFile" -> {
                     val inputBytes = call.argument<ByteArray>("audioBytes")
                     if (inputBytes == null || inputBytes.isEmpty()) {
                         result.error("INVALID_ARGS", "audioBytes cannot be empty", null)
@@ -100,10 +100,13 @@ class MainActivity : FlutterActivity() {
 
     private fun decodeAudioToWav(audioBytes: ByteArray): ByteArray {
         val extension = when {
-            audioBytes.size >= 2 && (audioBytes[0] == 0xFF.toByte()) && ((audioBytes[1].toInt() and 0xF6) == 0xF0) -> ".aac"
-            audioBytes.size >= 3 && audioBytes[0] == 'I'.code.toByte() && audioBytes[1] == 'D'.code.toByte() && audioBytes[2] == '3'.code.toByte() -> ".aac"
-            audioBytes.size >= 12 && audioBytes[4] == 'f'.code.toByte() && audioBytes[5] == 't'.code.toByte() && audioBytes[6] == 'y'.code.toByte() && audioBytes[7] == 'p'.code.toByte() -> ".m4a"
+            audioBytes.size >= 4 && audioBytes[0] == 'R'.code.toByte() && audioBytes[1] == 'I'.code.toByte() && audioBytes[2] == 'F'.code.toByte() && audioBytes[3] == 'F'.code.toByte() -> ".wav"
+            audioBytes.size >= 2 && (audioBytes[0].toInt() and 0xFF) == 0xFF && ((audioBytes[1].toInt() and 0xF0) == 0xF0) -> ".aac"
+            audioBytes.size >= 3 && audioBytes[0] == 'I'.code.toByte() && audioBytes[1] == 'D'.code.toByte() && audioBytes[2] == '3'.code.toByte() -> ".mp3"
+            audioBytes.size >= 2 && (audioBytes[0].toInt() and 0xFF) == 0xFF && ((audioBytes[1].toInt() and 0xE0) == 0xE0) -> ".mp3"
+            audioBytes.size >= 8 && audioBytes[4] == 'f'.code.toByte() && audioBytes[5] == 't'.code.toByte() && audioBytes[6] == 'y'.code.toByte() && audioBytes[7] == 'p'.code.toByte() -> ".m4a"
             audioBytes.size >= 4 && audioBytes[0] == 'O'.code.toByte() && audioBytes[1] == 'g'.code.toByte() && audioBytes[2] == 'g'.code.toByte() && audioBytes[3] == 'S'.code.toByte() -> ".ogg"
+            audioBytes.size >= 4 && audioBytes[0] == 'f'.code.toByte() && audioBytes[1] == 'L'.code.toByte() && audioBytes[2] == 'a'.code.toByte() && audioBytes[3] == 'C'.code.toByte() -> ".flac"
             else -> ".audio"
         }
         val tempInput = File.createTempFile("native_audio_in_", extension, cacheDir)
@@ -139,10 +142,19 @@ class MainActivity : FlutterActivity() {
             val bufferInfo = MediaCodec.BufferInfo()
             var sawInputEOS = false
             var sawOutputEOS = false
-            var sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            var channelCount = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            var sampleRate = if (inputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            } else {
+                44100
+            }
+            var channelCount = if (inputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            } else {
+                2
+            }
 
-            while (!sawOutputEOS) {
+            var noOutputCount = 0
+            while (!sawOutputEOS && noOutputCount < 500) {
                 if (!sawInputEOS) {
                     val inputBufIndex = decoder.dequeueInputBuffer(10000L)
                     if (inputBufIndex >= 0) {
@@ -160,11 +172,13 @@ class MainActivity : FlutterActivity() {
 
                 val outputBufIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000L)
                 if (outputBufIndex >= 0) {
+                    noOutputCount = 0
                     val outputBuf = decoder.getOutputBuffer(outputBufIndex)!!
-                    val chunk = ByteArray(bufferInfo.size)
-                    outputBuf.get(chunk)
-                    outputBuf.clear()
-                    if (chunk.isNotEmpty()) {
+                    if (bufferInfo.size > 0) {
+                        outputBuf.position(bufferInfo.offset)
+                        outputBuf.limit(bufferInfo.offset + bufferInfo.size)
+                        val chunk = ByteArray(bufferInfo.size)
+                        outputBuf.get(chunk)
                         pcmOut.write(chunk)
                     }
                     decoder.releaseOutputBuffer(outputBufIndex, false)
@@ -173,8 +187,16 @@ class MainActivity : FlutterActivity() {
                     }
                 } else if (outputBufIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = decoder.outputFormat
-                    sampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                    channelCount = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        sampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    }
+                    if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        channelCount = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    }
+                } else {
+                    if (sawInputEOS) {
+                        noOutputCount++
+                    }
                 }
             }
 

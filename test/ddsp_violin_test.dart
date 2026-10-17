@@ -1,4 +1,4 @@
-import 'dart:io';
+// ignore_for_file: avoid_print
 import 'package:flutter_test/flutter_test.dart';
 import 'package:easy_violin/models/song_model.dart';
 import 'package:easy_violin/music_theory.dart';
@@ -63,8 +63,6 @@ void main() {
     print('DDSP Audio Rendered: ${pcm.length} samples (${pcm.length / 44100.0} sec)');
 
     // Save test WAV to /tmp/ddsp_song.wav
-    final dataSize = pcm.length * 2;
-    final buffer = File('/tmp/ddsp_song.wav').openWrite();
     // Verify peak
     double peak = 0.0;
     for (int i = 0; i < pcm.length; i++) {

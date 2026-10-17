@@ -52,7 +52,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
   final ValueNotifier<DetectedNoteInfo?> _noteNotifier = ValueNotifier<DetectedNoteInfo?>(null);
   SettingsService? _settings;
 
-  int _selectedTabIndex = 0;
+  int _selectedTabIndex = 2; // Direct to SongPracticeScreen
   ViolinString? _selectedTunerString;
   double _concertA4Hz = 440.0;
   bool _isMicActive = false;
@@ -76,7 +76,7 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
       setState(() {
         _settings = s;
         _concertA4Hz = s.concertA4Hz;
-        _selectedTabIndex = s.lastTab.clamp(0, 2);
+        _selectedTabIndex = 2; // Direct to SongPracticeScreen for instant test
       });
     }
   }
@@ -108,8 +108,8 @@ class _MainViolinScreenState extends State<MainViolinScreen> {
     }
     final now = DateTime.now();
     // Filter faint phantom sounds, background noise & room hum
-    if (result.frequencyHz <= 0 || result.confidence < 0.35) {
-      if (now.difference(_lastNoteTime).inMilliseconds > 450) {
+    if (result.frequencyHz <= 0 || result.confidence < 0.38) {
+      if (now.difference(_lastNoteTime).inMilliseconds > 180) {
         if (_currentNote != null || _noteNotifier.value != null) {
           _noteNotifier.value = null;
           _smoothedHz = 0.0;
